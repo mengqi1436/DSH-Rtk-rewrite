@@ -1,4 +1,4 @@
-# @local/dsh-rtk-rewrite
+# dsh-pwsh-rtk-rewrite
 
 DeepSeek Harness（DSH）原生 rtk 桥接插件：把 web profile 的 shell 执行器替换为
 rtk 改写子类，**所有 pwsh shell 命令在执行前经 `rtk rewrite "<cmd>"` 透明改写**，
@@ -29,7 +29,7 @@ DSH 的插件体系（cordis）允许一个 bundle 通过 patch 声明替换服�
 每个 context 只允许一个 `ctx.shell` 实现，因此 patch 做两件事：
 
 1. **禁用原执行器**：`- id: pwsh-sandbox / disabled: true`
-2. **插入本插件**：`insert: - id: rtk-pwsh-shell / name: '@local/dsh-rtk-rewrite'`
+2. **插入本插件**：`insert: - id: rtk-pwsh-shell / name: 'dsh-pwsh-rtk-rewrite'`
 
 加载后 shell 能力由 `RtkPwshExecutor` 提供，执行流程：
 
@@ -69,13 +69,13 @@ execute(spec)
 
 ```powershell
 # 从 npm（推荐，市场同源）
-dsh plugin --profile web add dsh-rtk-rewrite
+dsh plugin --profile web add dsh-pwsh-rtk-rewrite
 
 # 或直接从本地源码目录（开发模式）
 dsh plugin --profile web add E:\Code\dsh\Rtk
 
 # 卸载
-dsh plugin --profile web remove dsh-rtk-rewrite
+dsh plugin --profile web remove dsh-pwsh-rtk-rewrite
 ```
 
 也可以在 DSH 内置插件市场（[dshmarket](https://github.com/dsh-market/dsh-market)）中
