@@ -1,0 +1,11 @@
+# Replace the profile's pwsh sandbox executor with the rtk-rewriting subclass.
+# A patch row with an id and no insert targets the existing row: supplied fields
+# replace that row's fields (disabled flips it off). One ctx.shell implementation
+# per context — the original row must be disabled, not left mounted beside ours.
+- id: pwsh-sandbox
+  disabled: true
+
+- insert:
+    - id: rtk-pwsh-shell
+      name: '@local/dsh-rtk-rewrite'
+      config: {}

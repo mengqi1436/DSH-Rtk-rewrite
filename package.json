@@ -1,0 +1,9 @@
+{
+  "name": "@local/dsh-rtk-rewrite",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH shell executor that transparently rewrites commands through `rtk rewrite` before execution (sandbox semantics preserved).",
+  "exports": { ".": "./index.js" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}
