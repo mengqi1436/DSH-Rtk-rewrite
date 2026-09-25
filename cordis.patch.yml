@@ -7,5 +7,5 @@
 
 - insert:
     - id: rtk-pwsh-shell
-      name: dsh-rtk-rewrite
+      name: dsh-pwsh-rtk-rewrite
       config: {}
