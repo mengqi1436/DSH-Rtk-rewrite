@@ -1,6 +1,6 @@
 {
   "name": "dsh-pwsh-rtk-rewrite",
-  "version": "2.0.0",
+  "version": "1.0.1",
   "description": "DSH shell executor that transparently rewrites commands through `rtk rewrite` before execution (sandbox semantics preserved).",
   "type": "module",
   "exports": {

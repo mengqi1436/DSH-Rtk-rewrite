@@ -27,6 +27,11 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
+      # Node 22 ships npm 10.x which lacks the OIDC token-exchange code path
+      # (publishes then fail with PUT 404). Trusted publishing needs npm >= 11.5.1.
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@latest
+
       - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
@@ -34,18 +39,17 @@ jobs:
 
       # Bump only for plain pushes to main; tag pushes and manual runs publish
       # the version already in package.json.
-      # Escalate with [minor] or [major] anywhere in the commit message.
+      # Version rules (by commit subject prefix): major:/feat:/minor: -> that
+      # level, everything else -> patch.
       - name: Bump version (patch by default)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          MSG="$(git log -1 --pretty=%B)"
-          if echo "$MSG" | grep -qi '\[major\]'; then
-            npm version major -m "chore(release): %s [skip ci]"
-          elif echo "$MSG" | grep -qi '\[minor\]'; then
-            npm version minor -m "chore(release): %s [skip ci]"
-          else
-            npm version patch -m "chore(release): %s [skip ci]"
-          fi
+          SUBJ="$(git log -1 --pretty=%s)"
+          case "$SUBJ" in
+            major*) npm version major -m "chore(release): %s [skip ci]" ;;
+            feat*|minor*) npm version minor -m "chore(release): %s [skip ci]" ;;
+            *) npm version patch -m "chore(release): %s [skip ci]" ;;
+          esac
           git push origin HEAD:main
           git push origin --tags
 
