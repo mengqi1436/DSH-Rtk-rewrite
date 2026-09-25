@@ -7,6 +7,7 @@
   "files": ["index.js", "cordis.patch.yml", "README.md"],
   "keywords": ["dsh", "dsh-plugin", "rtk", "deepseek-harness", "shell", "token-savings"],
   "license": "MIT",
+  "author": "mengqi1436",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mengqi1436/DSH-Rtk-rewrite.git"

@@ -119,3 +119,7 @@ dsh --profile web --dump-config   # 确认 pwsh-sandbox disabled、rtk-pwsh-shel
 ├── test.js           # 最小自检：改写判定规则行为验证 + 模块加载
 └── README.md
 ```
+
+## License
+
+[MIT](LICENSE) © 2026 mengqi1436
