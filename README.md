@@ -54,11 +54,12 @@ execute(spec)
   stdin/env 与沙箱字段全部原样。沙箱 confine 包裹的是**改写后**的命令。
 - **spec.command 是原始命令**：UTF-8 preamble 在 `PwshLocalExecutor` 的 spawnSpec
   层才拼接，`execute()` 看到的命令文本可安全直接喂给 `rtk rewrite`。
-- **内置包用 createRequire 从 dsh 安装路径解析**：npm 上的
+- **内置包从 dsh 本体安装路径解析**：npm 上的
   `@deepseek-ai/dsh-pwsh-sandbox` 版本落后于本机 dsh（registry 0.1.5-rc.3 vs
-  本机 0.1.7-rc.2），故 bundle 不声明 npm 依赖，改从 dsh 本体安装路径加载。
-  **dsh 升级或迁移安装位置后，需更新 `index.js` 顶部的
-  `DSH_INSTALL_PACKAGE_JSON` 常量。**
+  本机 0.1.7-rc.2），故该核心包声明为 peerDependency（供市场做 host-aware
+  兼容发现），运行时按顺序自动探测：`DSH_INSTALL_PACKAGE_JSON` 环境变量 →
+  正常依赖链 → Windows 布局 `<node目录>/node_modules/@deepseek-ai/dsh` →
+  POSIX nvm 布局 `<node目录>/../lib/node_modules/@deepseek-ai/dsh`。
 - **rtk exit code 语义**（实测 rtk 0.50.0，与 `--help` 文档的 "exits 0" 不同）：
   支持的命令（含已是 rtk 形式的）exit 3 + 命令在 stdout；无等价 exit 1 无输出。
   Node v24 的 execFile 把子进程退出码放在 `err.code`（数字），spawn 失败
@@ -67,11 +68,22 @@ execute(spec)
 ## 安装 / 卸载
 
 ```powershell
-dsh plugin --profile web add E:\Code\dsh\Rtk                  # 安装进 web profile
-dsh plugin --profile web remove @local/dsh-rtk-rewrite        # 卸载
+# 从 npm（推荐，市场同源）
+dsh plugin --profile web add dsh-rtk-rewrite
+
+# 或直接从本地源码目录（开发模式）
+dsh plugin --profile web add E:\Code\dsh\Rtk
+
+# 卸载
+dsh plugin --profile web remove dsh-rtk-rewrite
 ```
 
-安装后重启 GUI / 新会话生效（替换已安装代码需重启以加载新模块代）。
+也可以在 DSH 内置插件市场（[dshmarket](https://github.com/dsh-market/dsh-market)）中
+一键安装。安装后重启 GUI / 新会话生效（替换已安装代码需重启以加载新模块代）。
+
+若插件找不到 dsh 本体的核心包，设置环境变量 `DSH_INSTALL_PACKAGE_JSON`
+指向 dsh 安装目录下的 `package.json` 即可（一般自动探测已覆盖：正常依赖链、
+Windows 布局 `<node>/node_modules`、POSIX nvm 布局 `<node>/../lib/node_modules`）。
 
 ## 禁用
 

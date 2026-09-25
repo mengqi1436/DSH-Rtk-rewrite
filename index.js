@@ -18,18 +18,53 @@
  */
 import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
+import path from 'node:path';
+import { existsSync } from 'node:fs';
 
-// The dsh-shipped packages are not published at matching versions on npm
-// (registry @deepseek-ai/dsh is 0.1.5-rc.3; this machine runs 0.1.7-rc.2), so
-// the bundle declares no npm dependency and resolves them from the dsh
-// installation instead. If dsh moves or upgrades to a new install location,
-// update this constant.
-const DSH_INSTALL_PACKAGE_JSON =
-  'E:/Tool/nvm/v24.19.0/node_modules/@deepseek-ai/dsh/package.json';
+const CORE_PACKAGE = '@deepseek-ai/dsh-pwsh-sandbox';
 
-const { SandboxPwshExecutor } = createRequire(DSH_INSTALL_PACKAGE_JSON)(
-  '@deepseek-ai/dsh-pwsh-sandbox',
-);
+/**
+ * Resolve the dsh-shipped `@deepseek-ai/dsh-pwsh-sandbox` from the running
+ * dsh installation. The npm registry publishes these packages only at old
+ * versions (dsh 0.1.5-rc.3 vs. current hosts), so the bundle declares the
+ * core package as a peerDependency (for the market's host-aware discovery)
+ * but loads the copy shipped inside the dsh install itself.
+ *
+ * Resolution order:
+ *  1. `DSH_INSTALL_PACKAGE_JSON` env var — explicit override, path to the
+ *     dsh installation's package.json
+ *  2. Normal node resolution from this module (works when npm links the
+ *     peer to a matching-version host)
+ *  3. `<node install>/node_modules/@deepseek-ai/dsh` (Windows layout:
+ *     E:\Tool\nvm\v24\node.exe → E:\Tool\nvm\v24\node_modules\...)
+ *  4. `<node install>/../lib/node_modules/@deepseek-ai/dsh` (POSIX nvm
+ *     layout: ~/.nvm/versions/node/v24/bin/node → .../lib/node_modules/...)
+ */
+function resolveDshPackageJson() {
+  if (process.env.DSH_INSTALL_PACKAGE_JSON) return process.env.DSH_INSTALL_PACKAGE_JSON;
+  try {
+    return createRequire(import.meta.url).resolve(`${CORE_PACKAGE}/package.json`);
+  } catch { /* not on the normal resolution chain */ }
+  try {
+    return createRequire(import.meta.url).resolve('@deepseek-ai/dsh/package.json');
+  } catch { /* dsh itself not installed as a dependency */ }
+  const nodeDir = path.dirname(process.execPath);
+  for (const candidate of [
+    path.join(nodeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+    path.join(nodeDir, '..', 'lib', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+  ]) {
+    try {
+      if (existsSync(candidate)) return candidate;
+    } catch { /* unreadable path */ }
+  }
+  throw new Error(
+    `Cannot resolve the dsh core package "${CORE_PACKAGE}". ` +
+    `Set DSH_INSTALL_PACKAGE_JSON to the package.json of your dsh installation ` +
+    `(e.g. <node dir>/node_modules/@deepseek-ai/dsh/package.json).`,
+  );
+}
+
+const { SandboxPwshExecutor } = createRequire(resolveDshPackageJson())(CORE_PACKAGE);
 
 const REWRITE_TIMEOUT_MS = 5000;
 const RTK_BIN = process.env.RTK_BIN || 'rtk';
