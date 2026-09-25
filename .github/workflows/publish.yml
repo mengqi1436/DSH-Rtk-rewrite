@@ -2,22 +2,54 @@ name: Publish to npm
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
       id-token: write # OIDC trusted publishing — no npm token required
-      contents: read
+      contents: write # push the version-bump commit and tag back to main
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # Bump only for plain pushes to main; tag pushes and manual runs publish
+      # the version already in package.json.
+      # Escalate with [minor] or [major] anywhere in the commit message.
+      - name: Bump version (patch by default)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          MSG="$(git log -1 --pretty=%B)"
+          if echo "$MSG" | grep -qi '\[major\]'; then
+            npm version major -m "chore(release): %s [skip ci]"
+          elif echo "$MSG" | grep -qi '\[minor\]'; then
+            npm version minor -m "chore(release): %s [skip ci]"
+          else
+            npm version patch -m "chore(release): %s [skip ci]"
+          fi
+          git push origin HEAD:main
+          git push origin --tags
+
       - name: Wait for npm trusted-publisher config propagation
         run: sleep 60
-      - run: npm publish
+
+      - run: npm publish --provenance
