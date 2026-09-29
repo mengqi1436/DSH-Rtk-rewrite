@@ -6,6 +6,11 @@ rtk 改写子类，**所有 pwsh shell 命令在执行前经 `rtk rewrite "<cmd>
 
 已在本机实测验证（2026-09-25，dsh 0.1.7-rc.2 + rtk 0.50.0 + Node v24.19.0）：
 
+**0.2.0 兼容性**（2026-09-29 验证）：`@deepseek-ai/dsh-pwsh-sandbox@0.2.0-rc.1`
+与 `0.1.7-rc.2` 的 `lib/index.js` **逐字节相同**（252 行 0 差异），`SandboxPwshExecutor`
+具名导出、`execute(spec)` 签名与 resolve() 策略印章层全部不变——本插件**无需代码改动**，
+peerDependencies 已扩展为 `>=0.2.0-rc.1 <0.3.0-0`（v1.1.0 起）。
+
 ```
 [rtk-rewrite] "git status" -> "rtk git status"
 [rtk-rewrite] "cat E:\\CLI\\dsh-web.log" -> "rtk read E:\\CLI\\dsh-web.log"
@@ -19,7 +24,7 @@ rtk 改写子类，**所有 pwsh shell 命令在执行前经 `rtk rewrite "<cmd>
 
 ## 环境要求
 
-- **DeepSeek Harness ≥ 0.1.7**（`dsh` CLI，插件机制 `dsh plugin`）
+- **DeepSeek Harness ≥ 0.1.7（含 0.2.0-rc.1）**（`dsh` CLI，插件机制 `dsh plugin`）
 - **rtk ≥ 0.50.0** 在 PATH 上（`rtk rewrite` 子命令可用；可用 `RTK_BIN` 环境变量指定别名）
 - Windows + PowerShell（插件替换的是 pwsh 执行器；bash/其他 shell 工具不受影响）
 
@@ -55,8 +60,9 @@ execute(spec)
 - **spec.command 是原始命令**：UTF-8 preamble 在 `PwshLocalExecutor` 的 spawnSpec
   层才拼接，`execute()` 看到的命令文本可安全直接喂给 `rtk rewrite`。
 - **内置包从 dsh 本体安装路径解析**：npm 上的
-  `@deepseek-ai/dsh-pwsh-sandbox` 版本落后于本机 dsh（registry 0.1.5-rc.3 vs
-  本机 0.1.7-rc.2），故该核心包声明为 peerDependency（供市场做 host-aware
+  `@deepseek-ai/dsh-pwsh-sandbox` 版本常落后或超前于本机 dsh 运行时
+  （registry 曾长期停在 0.1.5-rc.3，0.2.0 起恢复发布但与桌面版装配仍可能错位），
+  故该核心包声明为 peerDependency（供市场做 host-aware
   兼容发现），运行时按顺序自动探测：`DSH_INSTALL_PACKAGE_JSON` 环境变量 →
   正常依赖链 → Windows 布局 `<node目录>/node_modules/@deepseek-ai/dsh` →
   POSIX nvm 布局 `<node目录>/../lib/node_modules/@deepseek-ai/dsh`。

@@ -6,6 +6,10 @@
   disabled: true
 
 - insert:
+    # Mirror the base row's platform guard: on non-Windows the pwsh executor is
+    # intentionally off, and this subclass must NOT become the only ctx.shell
+    # on bash hosts.
     - id: rtk-pwsh-shell
       name: dsh-pwsh-rtk-rewrite
       config: {}
+      disabled: !!js process.platform !== 'win32'

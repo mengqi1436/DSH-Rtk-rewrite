@@ -25,8 +25,10 @@ const CORE_PACKAGE = '@deepseek-ai/dsh-pwsh-sandbox';
 
 /**
  * Resolve the dsh-shipped `@deepseek-ai/dsh-pwsh-sandbox` from the running
- * dsh installation. The npm registry publishes these packages only at old
- * versions (dsh 0.1.5-rc.3 vs. current hosts), so the bundle declares the
+ * dsh installation. The npm registry copy of this package often lags (or
+ * diverges from) the copy shipped inside the running host (it sat at
+ * 0.1.5-rc.3 for a long stretch; 0.2.0 resumed publishing but the desktop
+ * bundle may still assemble a different rev), so the bundle declares the
  * core package as a peerDependency (for the market's host-aware discovery)
  * but loads the copy shipped inside the dsh install itself.
  *
