@@ -18,13 +18,13 @@ PowerShell 在完成状态后带有空格时无法正确识别命令结束、丢
 问题位于 dsh 内核侧而非本 sandbox 包。另将桌面端 0.2.0-rc.2 `app.asar` 内置的
 `dsh-pwsh-sandbox` 提取比对，与 npm rc.2 亦**逐字节一致**（同一 SHA256）。
 
-**桌面端适配**（2026-09-30 实机验证并修复，v1.1.2）：桌面端 0.2.0-rc.2 的 dsh 内核
+**桌面端适配**（2026-09-30 实机验证并修复，v1.1.3）：桌面端 0.2.0-rc.2 的 dsh 内核
 打包在 `resources\app.asar` 内，桌面 profile 依赖链与 node 目录布局均解析不到内核包，
 插件原四条探测链全部落空 → `rtk-pwsh-shell` 服务加载失败、patch 静默回退原生 shell
-（装配层 patch 声明正确，`loadProfileDirectory` 实探确认）。v1.1.2 新增第五条
+（装配层 patch 声明正确，`loadProfileDirectory` 实探确认）。v1.1.3 新增第五条
 **Electron 桌面布局探测链** `<exe 目录>\resources\app.asar\dsh\node_modules\@deepseek-ai\dsh`，
 在桌面端主进程形态下实测命中（Electron 的 asar fs 支持），`node test.js` 同形态
-6 项全过。装 v1.1.2 后**重启桌面端**即生效，无需设置 `DSH_INSTALL_PACKAGE_JSON`。
+6 项全过。装 v1.1.3 后**重启桌面端**即生效，无需设置 `DSH_INSTALL_PACKAGE_JSON`。
 
 ```
 [rtk-rewrite] "git status" -> "rtk git status"
@@ -82,7 +82,7 @@ execute(spec)
   正常依赖链 → Windows 布局 `<node目录>/node_modules/@deepseek-ai/dsh` →
   POSIX nvm 布局 `<node目录>/../lib/node_modules/@deepseek-ai/dsh` →
   Electron 桌面布局 `<exe目录>/resources/app.asar/dsh/node_modules/@deepseek-ai/dsh`
-  （v1.1.2 起，桌面端主进程内 fs 对 asar 透明，实测命中）。
+  （v1.1.3 起，桌面端主进程内 fs 对 asar 透明，实测命中）。
 - **rtk exit code 语义**（实测 rtk 0.50.0，与 `--help` 文档的 "exits 0" 不同）：
   支持的命令（含已是 rtk 形式的）exit 3 + 命令在 stdout；无等价 exit 1 无输出。
   Node v24 的 execFile 把子进程退出码放在 `err.code`（数字），spawn 失败
@@ -116,17 +116,17 @@ Windows 布局 `<node>/node_modules`、POSIX nvm 布局 `<node>/../lib/node_modu
 **安装**（必须钉精确版本：`@latest` 会被 release-age 校验回落到旧版）：
 
 ```powershell
-dsh plugin --profile desktop add dsh-pwsh-rtk-rewrite@1.1.2 --registry=https://registry.npmjs.org/
+dsh plugin --profile desktop add dsh-pwsh-rtk-rewrite@1.1.3 --registry=https://registry.npmjs.org/
 ```
 
 **内核包解析说明**：桌面端 dsh 内核打包在安装目录的 `app.asar` 内（Windows 下
 如 `E:\Tool\DSH\resources\app.asar\dsh\`），桌面 profile 的依赖链与 node 目录布局
-均探测不到内核包。**v1.1.2 起插件新增 Electron 桌面布局探测链，在桌面端进程内
+均探测不到内核包。**v1.1.3 起插件新增 Electron 桌面布局探测链，在桌面端进程内
 自动命中 `app.asar` 内核包，无需任何配置**。旧版本（≤ 1.1.1）在桌面端会因解析
 失败而静默回退原生 shell（表现为装了插件但 rtk 不生效），手动兜底方式是在
 **桌面端进程环境**里设 `DSH_INSTALL_PACKAGE_JSON` 指向
 `<桌面端安装目录>\resources\app.asar\dsh\node_modules\@deepseek-ai\dsh\package.json`；
-升级到 v1.1.2 即无需此变量。
+升级到 v1.1.3 即无需此变量。
 
 **验证**：重启桌面端后跑一条 rtk 必认识的命令（如 `git status`），对比
 `rtk gain` 的 Total commands 计数上升即生效；或在工具输出中看到 rtk 紧凑格式。
