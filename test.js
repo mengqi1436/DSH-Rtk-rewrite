@@ -50,4 +50,16 @@ assert((await rtkRewrite('rtk git status')) === 'rtk git status', 'rtk git statu
 // 4. 模块本身可加载且导出类
 const mod = await import('./index.js');
 assert(typeof mod.default === 'function', 'index.js default export is a class');
+// 5. 桌面 Electron 布局探测链：拼接规则正确 + 本机真实桌面端（若安装）命中 asar 内内核包
+const { dshPackageJsonCandidates } = mod;
+const cands = dshPackageJsonCandidates('E:\\Tool\\DSH');
+assert(
+  cands.some((p) => p.includes('resources') && p.includes('app.asar') && p.includes('dsh')),
+  'desktop layout candidate contains resources/app.asar/dsh',
+);
+const realDesktop = 'E:\\Tool\\DSH\\DeepSeek Harness.exe';
+if (await import('node:fs').then((fs) => fs.existsSync(realDesktop))) {
+  const real = dshPackageJsonCandidates('E:\\Tool\\DSH').find((p) => p.includes('app.asar'));
+  assert(real && (await import('node:fs')).existsSync(real), 'real desktop install resolves asar kernel package.json');
+}
 console.log('ALL PASS');

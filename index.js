@@ -41,7 +41,21 @@ const CORE_PACKAGE = '@deepseek-ai/dsh-pwsh-sandbox';
  *     E:\Tool\nvm\v24\node.exe → E:\Tool\nvm\v24\node_modules\...)
  *  4. `<node install>/../lib/node_modules/@deepseek-ai/dsh` (POSIX nvm
  *     layout: ~/.nvm/versions/node/v24/bin/node → .../lib/node_modules/...)
+ *  5. `<exe dir>/resources/app.asar/dsh/node_modules/@deepseek-ai/dsh`
+ *     (Electron desktop layout: DeepSeek Harness.exe → the kernel packaged
+ *     inside app.asar; readable because the desktop main process patches fs
+ *     for asar, and this module runs inside that process)
  */
+export function dshPackageJsonCandidates(nodeDir) {
+  return [
+    path.join(nodeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+    path.join(nodeDir, '..', 'lib', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+    // Electron desktop app layout (DeepSeek Harness.exe ships the kernel in
+    // resources/app.asar; see dsh-desktop-host's own cli.js bootstrap path).
+    path.join(nodeDir, 'resources', 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+  ];
+}
+
 function resolveDshPackageJson() {
   if (process.env.DSH_INSTALL_PACKAGE_JSON) return process.env.DSH_INSTALL_PACKAGE_JSON;
   try {
@@ -51,10 +65,7 @@ function resolveDshPackageJson() {
     return createRequire(import.meta.url).resolve('@deepseek-ai/dsh/package.json');
   } catch { /* dsh itself not installed as a dependency */ }
   const nodeDir = path.dirname(process.execPath);
-  for (const candidate of [
-    path.join(nodeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
-    path.join(nodeDir, '..', 'lib', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
-  ]) {
+  for (const candidate of dshPackageJsonCandidates(nodeDir)) {
     try {
       if (existsSync(candidate)) return candidate;
     } catch { /* unreadable path */ }

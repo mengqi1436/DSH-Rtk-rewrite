@@ -11,6 +11,21 @@ rtk 改写子类，**所有 pwsh shell 命令在执行前经 `rtk rewrite "<cmd>
 具名导出、`execute(spec)` 签名与 resolve() 策略印章层全部不变——本插件**无需代码改动**，
 peerDependencies 已扩展为 `>=0.2.0-rc.1 <0.3.0-0`（v1.1.0 起）。
 
+**0.2.0-rc.2 兼容性**（2026-09-30 验证）：`@deepseek-ai/dsh-pwsh-sandbox@0.2.0-rc.2`
+与 `0.2.0-rc.1` 的 `lib/index.js` **逐字节相同**（SHA256 一致 `BED19D2C…`，252 行 0 差异），
+包内差异仅 `package.json` 的版本号与依赖版本号（rc.1 → rc.2）——rc.2 修复的「持久
+PowerShell 在完成状态后带有空格时无法正确识别命令结束、丢失退出码或泄露内部标记」
+问题位于 dsh 内核侧而非本 sandbox 包。另将桌面端 0.2.0-rc.2 `app.asar` 内置的
+`dsh-pwsh-sandbox` 提取比对，与 npm rc.2 亦**逐字节一致**（同一 SHA256）。
+
+**桌面端适配**（2026-09-30 实机验证并修复，v1.1.2）：桌面端 0.2.0-rc.2 的 dsh 内核
+打包在 `resources\app.asar` 内，桌面 profile 依赖链与 node 目录布局均解析不到内核包，
+插件原四条探测链全部落空 → `rtk-pwsh-shell` 服务加载失败、patch 静默回退原生 shell
+（装配层 patch 声明正确，`loadProfileDirectory` 实探确认）。v1.1.2 新增第五条
+**Electron 桌面布局探测链** `<exe 目录>\resources\app.asar\dsh\node_modules\@deepseek-ai\dsh`，
+在桌面端主进程形态下实测命中（Electron 的 asar fs 支持），`node test.js` 同形态
+6 项全过。装 v1.1.2 后**重启桌面端**即生效，无需设置 `DSH_INSTALL_PACKAGE_JSON`。
+
 ```
 [rtk-rewrite] "git status" -> "rtk git status"
 [rtk-rewrite] "cat E:\\CLI\\dsh-web.log" -> "rtk read E:\\CLI\\dsh-web.log"
@@ -24,7 +39,7 @@ peerDependencies 已扩展为 `>=0.2.0-rc.1 <0.3.0-0`（v1.1.0 起）。
 
 ## 环境要求
 
-- **DeepSeek Harness ≥ 0.1.7（含 0.2.0-rc.1）**（`dsh` CLI，插件机制 `dsh plugin`）
+- **DeepSeek Harness ≥ 0.1.7（含 0.2.0-rc.1 / 0.2.0-rc.2）**（`dsh` CLI，插件机制 `dsh plugin`）
 - **rtk ≥ 0.50.0** 在 PATH 上（`rtk rewrite` 子命令可用；可用 `RTK_BIN` 环境变量指定别名）
 - Windows + PowerShell（插件替换的是 pwsh 执行器；bash/其他 shell 工具不受影响）
 
@@ -65,7 +80,9 @@ execute(spec)
   故该核心包声明为 peerDependency（供市场做 host-aware
   兼容发现），运行时按顺序自动探测：`DSH_INSTALL_PACKAGE_JSON` 环境变量 →
   正常依赖链 → Windows 布局 `<node目录>/node_modules/@deepseek-ai/dsh` →
-  POSIX nvm 布局 `<node目录>/../lib/node_modules/@deepseek-ai/dsh`。
+  POSIX nvm 布局 `<node目录>/../lib/node_modules/@deepseek-ai/dsh` →
+  Electron 桌面布局 `<exe目录>/resources/app.asar/dsh/node_modules/@deepseek-ai/dsh`
+  （v1.1.2 起，桌面端主进程内 fs 对 asar 透明，实测命中）。
 - **rtk exit code 语义**（实测 rtk 0.50.0，与 `--help` 文档的 "exits 0" 不同）：
   支持的命令（含已是 rtk 形式的）exit 3 + 命令在 stdout；无等价 exit 1 无输出。
   Node v24 的 execFile 把子进程退出码放在 `err.code`（数字），spawn 失败
@@ -90,6 +107,32 @@ dsh plugin --profile web remove dsh-pwsh-rtk-rewrite
 若插件找不到 dsh 本体的核心包，设置环境变量 `DSH_INSTALL_PACKAGE_JSON`
 指向 dsh 安装目录下的 `package.json` 即可（一般自动探测已覆盖：正常依赖链、
 Windows 布局 `<node>/node_modules`、POSIX nvm 布局 `<node>/../lib/node_modules`）。
+
+### 桌面端安装
+
+**前置**：DSH 桌面端 **0.2.0-rc.2+** 已捆绑 `dsh` 命令——在桌面端菜单栏点击
+**"Manage dsh command"（管理 dsh 命令）** 完成安装即可，无需另装 Node/pnpm。
+
+**安装**（必须钉精确版本：`@latest` 会被 release-age 校验回落到旧版）：
+
+```powershell
+dsh plugin --profile desktop add dsh-pwsh-rtk-rewrite@1.1.2 --registry=https://registry.npmjs.org/
+```
+
+**内核包解析说明**：桌面端 dsh 内核打包在安装目录的 `app.asar` 内（Windows 下
+如 `E:\Tool\DSH\resources\app.asar\dsh\`），桌面 profile 的依赖链与 node 目录布局
+均探测不到内核包。**v1.1.2 起插件新增 Electron 桌面布局探测链，在桌面端进程内
+自动命中 `app.asar` 内核包，无需任何配置**。旧版本（≤ 1.1.1）在桌面端会因解析
+失败而静默回退原生 shell（表现为装了插件但 rtk 不生效），手动兜底方式是在
+**桌面端进程环境**里设 `DSH_INSTALL_PACKAGE_JSON` 指向
+`<桌面端安装目录>\resources\app.asar\dsh\node_modules\@deepseek-ai\dsh\package.json`；
+升级到 v1.1.2 即无需此变量。
+
+**验证**：重启桌面端后跑一条 rtk 必认识的命令（如 `git status`），对比
+`rtk gain` 的 Total commands 计数上升即生效；或在工具输出中看到 rtk 紧凑格式。
+
+**生效**：桌面端同样是 Windows + pwsh 环境，插件照常生效；安装完成后**重启桌面端**
+生效。
 
 ## 禁用
 
