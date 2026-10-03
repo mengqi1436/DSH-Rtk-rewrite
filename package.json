@@ -9,7 +9,8 @@
   "files": [
     "index.js",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "README_zh.md"
   ],
   "keywords": [
     "dsh",

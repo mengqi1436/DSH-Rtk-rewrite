@@ -1,0 +1,12 @@
+{
+    "schema_version": 2,
+    "commit": "a92d37699992671ceb54a5543eafc0463154c6c4",
+    "indexed_at": "2026-10-03T15:18:27Z",
+    "project": "E-Code-dsh-Rtk",
+    "nodes": 52,
+    "edges": 80,
+    "original_size": 1835008,
+    "compressed_size": 57188,
+    "compression_level": 9,
+    "reconcile_basis": "git-clean-head"
+}
