@@ -37,6 +37,17 @@ internal markers") lives in the dsh kernel, not in this sandbox package. The
 `dsh-pwsh-sandbox` copy bundled inside the desktop 0.2.0-rc.2 `app.asar` was also
 extracted and compared: byte-identical to the npm rc.2 (same SHA256).
 
+**0.2.1** (verified 2026-10-17): `@deepseek-ai/dsh-pwsh-sandbox@0.2.1-rc.2`'s
+`lib/index.js` is **byte-identical** to `0.2.0-rc.2` (same SHA256 `BED19D2C…`,
+0 diff) — the whole 0.2.1 line so far touched only README/locale/package.json
+metadata. The desktop 0.2.1-rc.1 `app.asar` was extracted and bundles the same
+byte-identical copy; the `pwsh-sandbox` cordis line is still present in the
+kernel, and the upstream changelog (v0.2.1-rc.1/rc.2) contains no
+shell-executor or patch-mechanism breaking changes. This plugin needs **no
+code change**; the existing peer range `>=0.2.0-rc.1 <0.3.0-0` already covers
+0.2.1-rc.1/rc.2, and `test.js` now loads the devDependency copy of
+`0.2.1-rc.2` under bare node to keep exercising the subclassing contract.
+
 **Desktop adaptation** (verified and fixed on a real machine 2026-09-30, v1.1.3):
 the desktop 0.2.0-rc.2 dsh kernel is packaged inside `resources\app.asar`; neither
 the desktop profile's dependency chain nor the node-directory layouts can resolve the
@@ -51,7 +62,8 @@ which hits in the desktop main process (thanks to Electron's asar fs support);
 
 ## Requirements
 
-- **DeepSeek Harness ≥ 0.1.7 (including 0.2.0-rc.1 / 0.2.0-rc.2)** desktop app
+- **DeepSeek Harness ≥ 0.1.7 (including 0.2.0-rc.1 / 0.2.0-rc.2 / 0.2.1-rc.1 /
+  0.2.1-rc.2)** desktop app
   (`dsh` CLI with the `dsh plugin` mechanism)
 - **rtk ≥ 0.50.0** on PATH (`rtk rewrite` subcommand available; use the `RTK_BIN`
   environment variable to point at an alias). Contract re-verified against rtk
@@ -126,7 +138,7 @@ Node/pnpm needed.
 by the release-age check):
 
 ```powershell
-dsh plugin --profile desktop add dsh-pwsh-rtk-rewrite@1.1.3 --registry=https://registry.npmjs.org/
+dsh plugin --profile desktop add dsh-pwsh-rtk-rewrite@1.1.4 --registry=https://registry.npmjs.org/
 ```
 
 **Uninstall**:
@@ -170,9 +182,10 @@ works as usual; **restart the desktop app** after installation.
 
 ```powershell
 node test.js               # rtkRewrite decision-logic self-check + module load
-                           # (module load only passes inside the Electron desktop
-                           #  main process; bare node cannot read the asar kernel
-                           #  package, so that check reports failure there)
+                           # (loads the devDependency copy of the sandbox
+                           #  package; the real-desktop asar hit check skips
+                           #  outside the Electron main process, where asar is
+                           #  not readable)
 ```
 
 Runtime verification (three mutually confirming pieces of evidence):
@@ -193,7 +206,7 @@ Runtime verification (three mutually confirming pieces of evidence):
 ```
 ├── index.js          # RtkPwshExecutor (only source: rtkRewrite + execute interception)
 ├── cordis.patch.yml  # bundle patch: disable pwsh-sandbox + insert rtk-pwsh-shell
-├── package.json      # dsh.bundle.patch points at the patch file; no npm dependencies
+├── package.json      # dsh.bundle.patch points at the patch file; no runtime dependencies
 ├── test.js           # minimal self-check: rewrite decision rules + module load
 ├── README.md         # English (this file)
 └── README_zh.md      # 中文

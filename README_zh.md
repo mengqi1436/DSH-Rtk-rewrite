@@ -33,6 +33,15 @@ PowerShell 在完成状态后带有空格时无法正确识别命令结束、丢
 问题位于 dsh 内核侧而非本 sandbox 包。另将桌面端 0.2.0-rc.2 `app.asar` 内置的
 `dsh-pwsh-sandbox` 提取比对，与 npm rc.2 亦**逐字节一致**（同一 SHA256）。
 
+**0.2.1 兼容性**（2026-10-17 验证）：`@deepseek-ai/dsh-pwsh-sandbox@0.2.1-rc.2`
+与 `0.2.0-rc.2` 的 `lib/index.js` **逐字节相同**（SHA256 一致 `BED19D2C…`，0 差异）
+——0.2.1 系列至今仅动 README/locale/package.json 元数据。桌面端 0.2.1-rc.1
+`app.asar` 内置副本提取比对亦为同一 SHA256；内核中 `pwsh-sandbox` cordis 行仍在，
+上游 changelog（v0.2.1-rc.1/rc.2）无 shell 执行器或 patch 机制相关破坏性变更。
+本插件**无需代码改动**，既有 peer 范围 `>=0.2.0-rc.1 <0.3.0-0` 已覆盖
+0.2.1-rc.1/rc.2；`test.js` 现以 devDependency 方式加载 `0.2.1-rc.2` 副本，
+在裸 node 下持续验证子类化契约。
+
 **桌面端适配**（2026-09-30 实机验证并修复，v1.1.3）：桌面端 0.2.0-rc.2 的 dsh 内核
 打包在 `resources\app.asar` 内，桌面 profile 依赖链与 node 目录布局均解析不到内核包，
 插件原四条探测链全部落空 → `rtk-pwsh-shell` 服务加载失败、patch 静默回退原生 shell
@@ -43,7 +52,8 @@ PowerShell 在完成状态后带有空格时无法正确识别命令结束、丢
 
 ## 环境要求
 
-- **DeepSeek Harness ≥ 0.1.7（含 0.2.0-rc.1 / 0.2.0-rc.2）桌面端**
+- **DeepSeek Harness ≥ 0.1.7（含 0.2.0-rc.1 / 0.2.0-rc.2 / 0.2.1-rc.1 /
+  0.2.1-rc.2）桌面端**
   （`dsh` CLI，插件机制 `dsh plugin`）
 - **rtk ≥ 0.50.0** 在 PATH 上（`rtk rewrite` 子命令可用；可用 `RTK_BIN` 环境变量
   指定别名）。契约已于 2026-10-03 对照 rtk 0.51.0 复核：退出码语义不变。
@@ -106,7 +116,7 @@ execute(spec)
 **安装**（必须钉精确版本：`@latest` 会被 release-age 校验回落到旧版）：
 
 ```powershell
-dsh plugin --profile desktop add dsh-pwsh-rtk-rewrite@1.1.3 --registry=https://registry.npmjs.org/
+dsh plugin --profile desktop add dsh-pwsh-rtk-rewrite@1.1.4 --registry=https://registry.npmjs.org/
 ```
 
 **卸载**：
@@ -143,8 +153,9 @@ dsh plugin --profile desktop remove dsh-pwsh-rtk-rewrite
 
 ```powershell
 node test.js               # rtkRewrite 判定逻辑自检 + 模块加载
-                           #（模块加载断言仅在 Electron 桌面端主进程内可过；
-                           #  裸 node 读不到 asar 内核包，该项会报失败，属预期）
+                           #（加载 devDependency 中的 sandbox 包副本；真实桌面端
+                           #  asar 命中检查仅在 Electron 主进程内可验证，裸 node
+                           #  读不到 asar，该项显示 skip 属预期）
 ```
 
 运行时验证（三重证据互相印证）：
@@ -164,7 +175,7 @@ node test.js               # rtkRewrite 判定逻辑自检 + 模块加载
 ```
 ├── index.js          # RtkPwshExecutor（唯一源码：rtkRewrite + execute 拦截）
 ├── cordis.patch.yml  # bundle patch：禁用 pwsh-sandbox + 插入 rtk-pwsh-shell
-├── package.json      # dsh.bundle.patch 指向 patch 文件；无 npm 依赖
+├── package.json      # dsh.bundle.patch 指向 patch 文件；无运行时 npm 依赖
 ├── test.js           # 最小自检：改写判定规则行为验证 + 模块加载
 ├── README.md         # English
 └── README_zh.md      # 中文（本文件）
