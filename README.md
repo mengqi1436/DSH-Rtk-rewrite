@@ -156,7 +156,7 @@ Node/pnpm needed.
 by the release-age check):
 
 ```powershell
-dsh plugin --profile desktop add dsh-pwsh-rtk-rewrite@1.1.6 --registry=https://registry.npmjs.org/
+dsh plugin --profile desktop add dsh-pwsh-rtk-rewrite@1.1.7 --registry=https://registry.npmjs.org/
 ```
 
 **Uninstall**:
