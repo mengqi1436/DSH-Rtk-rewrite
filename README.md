@@ -159,6 +159,10 @@ by the release-age check):
 dsh plugin --profile desktop add dsh-pwsh-rtk-rewrite@1.1.7 --registry=https://registry.npmjs.org/
 ```
 
+> Versions come from CI, which patch-bumps and publishes on every push to `main`,
+> so the number above can trail the newest release. If the install fails with a
+> 404, run `npm view dsh-pwsh-rtk-rewrite version` and pin that exact version instead.
+
 **Uninstall**:
 
 ```powershell

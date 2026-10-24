@@ -133,6 +133,10 @@ execute(spec)
 dsh plugin --profile desktop add dsh-pwsh-rtk-rewrite@1.1.7 --registry=https://registry.npmjs.org/
 ```
 
+> 版本号由 CI 维护：每次推送 `main` 都会自动 patch 升版并发布，所以上面的数字
+> 可能落后于最新发布。若安装报 404，先执行 `npm view dsh-pwsh-rtk-rewrite version`
+> 查到最新版本，再用该精确版本号替换。
+
 **卸载**：
 
 ```powershell
