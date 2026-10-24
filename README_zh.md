@@ -39,8 +39,22 @@ PowerShell 在完成状态后带有空格时无法正确识别命令结束、丢
 `app.asar` 内置副本提取比对亦为同一 SHA256；内核中 `pwsh-sandbox` cordis 行仍在，
 上游 changelog（v0.2.1-rc.1/rc.2）无 shell 执行器或 patch 机制相关破坏性变更。
 本插件**无需代码改动**，既有 peer 范围 `>=0.2.0-rc.1 <0.3.0-0` 已覆盖
-0.2.1-rc.1/rc.2；`test.js` 现以 devDependency 方式加载 `0.2.1-rc.2` 副本，
-在裸 node 下持续验证子类化契约。
+0.2.1-rc.1/rc.2；当时 `test.js` 以 devDependency 方式加载 `0.2.1-rc.2` 副本，
+在裸 node 下持续验证子类化契约（该 pin 后续已随 0.2.1-rc.3 更新，见下条）。
+
+**0.2.1-rc.3 兼容性**（2026-10-24 验证）：`@deepseek-ai/dsh-pwsh-sandbox@0.2.1-rc.3`
+与 `0.2.1-rc.2` 的 `lib/index.js` **逐字节相同**（SHA256 一致 `BED19D2C…`，252 行
+0 差异），包内差异仅 `package.json`——版本号及其内部依赖版本号（rc.2 → rc.3）。
+上游 [dsh-v0.2.1-rc.3](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.1-rc.3)
+changelog 无 shell 执行器或 patch 机制相关破坏性变更：对 `dsh-v0.2.1-rc.2` 做全量
+tree 比对，`packages/shell/**`、`packages/sandbox/**`、`packages/subprocess/**` 仅各自
+`package.json` 的版本号变化（无源码文件变更），patch 文法文件
+`packages/bundle/base/cordis.patch.yml` 两 tag 完全一致（唯一变动的
+`cordis.patch.yml` 是 web bundle 新增一条 UI 入口定制插件行）。本插件**无需代码改动**，
+既有 peer 范围 `>=0.2.0-rc.1 <0.3.0-0` 在 DSH 的
+`semver.satisfies(..., { includePrerelease: true })` 判定下已覆盖 0.2.1-rc.3；
+`test.js` 现以 devDependency 方式加载 `0.2.1-rc.3` 副本。本条通过比对 npm 包与上游
+仓库 tree 得出，未对桌面端做重新安装复验。
 
 **桌面端适配**（2026-09-30 实机验证并修复，v1.1.3）：桌面端 0.2.0-rc.2 的 dsh 内核
 打包在 `resources\app.asar` 内，桌面 profile 依赖链与 node 目录布局均解析不到内核包，
@@ -53,7 +67,7 @@ PowerShell 在完成状态后带有空格时无法正确识别命令结束、丢
 ## 环境要求
 
 - **DeepSeek Harness ≥ 0.1.7（含 0.2.0-rc.1 / 0.2.0-rc.2 / 0.2.1-rc.1 /
-  0.2.1-rc.2）桌面端**
+  0.2.1-rc.2 / 0.2.1-rc.3）桌面端**
   （`dsh` CLI，插件机制 `dsh plugin`）
 - **rtk ≥ 0.50.0** 在 PATH 上（`rtk rewrite` 子命令可用；可用 `RTK_BIN` 环境变量
   指定别名）。契约已于 2026-10-03 对照 rtk 0.51.0 复核：退出码语义不变。
@@ -116,7 +130,7 @@ execute(spec)
 **安装**（必须钉精确版本：`@latest` 会被 release-age 校验回落到旧版）：
 
 ```powershell
-dsh plugin --profile desktop add dsh-pwsh-rtk-rewrite@1.1.4 --registry=https://registry.npmjs.org/
+dsh plugin --profile desktop add dsh-pwsh-rtk-rewrite@1.1.6 --registry=https://registry.npmjs.org/
 ```
 
 **卸载**：

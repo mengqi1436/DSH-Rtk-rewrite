@@ -45,8 +45,26 @@ byte-identical copy; the `pwsh-sandbox` cordis line is still present in the
 kernel, and the upstream changelog (v0.2.1-rc.1/rc.2) contains no
 shell-executor or patch-mechanism breaking changes. This plugin needs **no
 code change**; the existing peer range `>=0.2.0-rc.1 <0.3.0-0` already covers
-0.2.1-rc.1/rc.2, and `test.js` now loads the devDependency copy of
-`0.2.1-rc.2` under bare node to keep exercising the subclassing contract.
+0.2.1-rc.1/rc.2, and `test.js` loaded the devDependency copy of `0.2.1-rc.2` under
+bare node to keep exercising the subclassing contract (that pin has since moved to
+`0.2.1-rc.3`, see the next entry).
+
+**0.2.1-rc.3** (verified 2026-10-24): `@deepseek-ai/dsh-pwsh-sandbox@0.2.1-rc.3`'s
+`lib/index.js` is **byte-identical** to `0.2.1-rc.2` (same SHA256 `BED19D2C…`, 252
+lines, 0 diff); the only in-package diff is `package.json` — the package version and
+its internal dependency pins (rc.2 → rc.3). The upstream
+[dsh-v0.2.1-rc.3](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.1-rc.3)
+changelog carries no shell-executor or patch-mechanism breaking changes: a full tree
+diff against `dsh-v0.2.1-rc.2` shows `packages/shell/**`, `packages/sandbox/**` and
+`packages/subprocess/**` touching only their `package.json` versions (no source
+files), and the patch-grammar file `packages/bundle/base/cordis.patch.yml` is
+identical across the two tags (the only `cordis.patch.yml` change is one added UI
+entry-customization line in the web bundle). This plugin needs **no code change**;
+the existing peer range `>=0.2.0-rc.1 <0.3.0-0` already covers 0.2.1-rc.3 under
+DSH's `semver.satisfies(..., { includePrerelease: true })` check, and `test.js` now
+loads the devDependency copy of `0.2.1-rc.3`. This entry was verified by comparing
+the npm packages and the upstream repository trees — no desktop re-installation test
+was run for it.
 
 **Desktop adaptation** (verified and fixed on a real machine 2026-09-30, v1.1.3):
 the desktop 0.2.0-rc.2 dsh kernel is packaged inside `resources\app.asar`; neither
@@ -63,7 +81,7 @@ which hits in the desktop main process (thanks to Electron's asar fs support);
 ## Requirements
 
 - **DeepSeek Harness ≥ 0.1.7 (including 0.2.0-rc.1 / 0.2.0-rc.2 / 0.2.1-rc.1 /
-  0.2.1-rc.2)** desktop app
+  0.2.1-rc.2 / 0.2.1-rc.3)** desktop app
   (`dsh` CLI with the `dsh plugin` mechanism)
 - **rtk ≥ 0.50.0** on PATH (`rtk rewrite` subcommand available; use the `RTK_BIN`
   environment variable to point at an alias). Contract re-verified against rtk
@@ -138,7 +156,7 @@ Node/pnpm needed.
 by the release-age check):
 
 ```powershell
-dsh plugin --profile desktop add dsh-pwsh-rtk-rewrite@1.1.4 --registry=https://registry.npmjs.org/
+dsh plugin --profile desktop add dsh-pwsh-rtk-rewrite@1.1.6 --registry=https://registry.npmjs.org/
 ```
 
 **Uninstall**:
