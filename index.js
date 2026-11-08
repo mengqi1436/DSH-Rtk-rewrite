@@ -13,8 +13,19 @@
  *    PwshLocalExecutor (lib/index.js), so spec.command seen here is the raw
  *    command — safe to feed to `rtk rewrite` directly.
  *  - Failure safety: any rewrite failure (rtk missing, exit 1 = no equivalent,
- *    timeout) runs the original command unrewritten. Execution is never
- *    blocked or denied by this plugin.
+ *    exit 2 = deny, timeout) runs the original command unrewritten. Execution
+ *    is never blocked or denied by this plugin. That tolerance covers the
+ *    rewrite only — a failure thrown by super.execute() is the execution's
+ *    own and propagates untouched (see execute()).
+ *  - `rtk rewrite` already decomposes compound commands and pipelines itself
+ *    (`&&`, `||`, `;`, `|`) and returns the whole line rewritten, so this
+ *    plugin hands the entire command over as one string — it never splits.
+ *  - There is no command allowlist here: rtk routes every command family
+ *    (cloud/dotnet/git/go/js/jvm/php/python/ruby/rust/scala/system/...) from
+ *    its own rule registry, so new rtk families are covered for free.
+ *  - `isRtkInvocation` is a best-effort fast path that skips rewriting when
+ *    every segment already calls rtk; it does not read through wrappers or
+ *    quoted env values, and the misses are safe (see its own comment).
  */
 import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -86,23 +97,108 @@ const warn = (...parts) => console.warn('[rtk-rewrite]', ...parts);
 
 let missingWarned = false;
 
+const RTK_EXE_NAMES = new Set(['rtk', 'rtk.exe']);
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/** Split a command line on unquoted `;` `&` `|` and newlines. */
+function splitSegments(command) {
+  const segments = [];
+  let start = 0;
+  let quote = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === ';' || ch === '&' || ch === '|' || ch === '\n') {
+      segments.push(command.slice(start, i));
+      while (i + 1 < command.length && '&|'.includes(command[i + 1])) i++;
+      start = i + 1;
+    }
+  }
+  segments.push(command.slice(start));
+  return segments.filter((segment) => segment.trim().length > 0);
+}
+
+/** Read the first word of a segment, honouring a wrapping quote pair. */
+function firstWord(segment) {
+  const text = segment.trimStart();
+  const quote = text[0] === '"' || text[0] === "'" ? text[0] : null;
+  if (quote) {
+    const close = text.indexOf(quote, 1);
+    return close === -1 ? text : text.slice(1, close);
+  }
+  const end = text.search(/[\s;|&]/);
+  return end === -1 ? text : text.slice(0, end);
+}
+
+/** Does this segment's first real word name the rtk binary? */
+function isRtkSegment(segment) {
+  let rest = segment.trimStart();
+  // Skip `FOO=1` env-assignment prefixes (`RTK_DISABLED=1 rtk ...`).
+  for (;;) {
+    const word = firstWord(rest);
+    if (!ENV_ASSIGNMENT.test(word)) break;
+    rest = rest.trimStart().slice(word.length);
+  }
+  let word = firstWord(rest).replace(/^["']|["']$/g, '');
+  const basename = word.split(/[\\/]/).pop();
+  if (basename !== undefined && basename !== '') word = basename;
+  return RTK_EXE_NAMES.has(word.toLowerCase());
+}
+
+/**
+ * True when every segment of `command` already invokes rtk, so rewriting it
+ * would only ask rtk to echo the line back.
+ *
+ * Segment-aware on purpose: `ls -la && rtk git status` must still reach rtk,
+ * because its first segment deserves a rewrite. Bare `startsWith('rtk ')`
+ * missed the qualified/quoted/case-variant spellings; a whole-string
+ * `includes('rtk ')` test would skip the mixed line above.
+ *
+ * This is a fast path, not a complete recogniser. It does not read through a
+ * wrapper (`sudo rtk ...`, `powershell -c "rtk ..."`), a quoted env value
+ * (`FOO="a b" rtk ...`), an assignment whose name collides (`rtk=1 ls`), a
+ * CRLF line break, or a `#` comment. Those all return false and simply get
+ * rewritten once more, which is safe because rtk exits 1 on a first word it
+ * does not recognise — so safety here leans on upstream's tolerance, and it
+ * needs revisiting if rtk ever starts rewriting through `sudo`/`powershell`.
+ * rtk's own guard is case-sensitive and literal-only (`registry.rs:836`,
+ * `:2008`), so this is still deliberately broader than upstream.
+ */
+export function isRtkInvocation(command) {
+  const segments = splitSegments(String(command));
+  return segments.length > 0 && segments.every(isRtkSegment);
+}
+
 /**
  * Ask rtk for the rewritten form of `command`.
  * Resolves the rewritten command string, or null when the command must run
  * unrewritten (no equivalent / rtk unavailable / timeout / any failure).
  *
- * Observed exit-code behavior (rtk 0.50.0 on Windows, differs from --help
- * which documents "exits 0"): a supported command — including one already in
- * rtk form — exits 3 with the command on stdout; no equivalent exits 1 with
- * no output. Node v24's execFile surfaces the child's exit code on err.code
- * (a number, e.g. 3) with err.exitCode undefined; spawn failures like
- * ENOENT put a string on err.code. Hence the Number(err.code) checks.
+ * Exit-code contract (`src/hooks/rewrite_cmd.rs:111-124`, mirrored in
+ * `rtk rewrite --help`): 0 = rewritten, allow rules cover every command;
+ * 3 = rewritten, host must confirm (the normal case — no rules configured);
+ * 1 = nothing rewritten, run unchanged; 2 = a deny rule matched, nothing
+ * printed. 0 and 3 both carry the line on stdout, and rtk does NOT suppress
+ * identity rewrites, so the caller must compare against the original.
+ * Node's execFile puts the child's exit code on err.code as a number with
+ * err.exitCode undefined; spawn failures like ENOENT put a string there —
+ * hence the Number(err.code) checks.
  */
 function rtkRewrite(command) {
   return new Promise((resolve) => {
     execFile(
       RTK_BIN,
-      ['rewrite', command],
+      // `--` keeps clap from eating a leading-dash command as its own flag:
+      // `rtk rewrite -h` would print help on stdout and exit 0, and that text
+      // would then be handed to the shell as if it were a rewritten command.
+      command.startsWith('-') ? ['rewrite', '--', command] : ['rewrite', command],
       { timeout: REWRITE_TIMEOUT_MS, windowsHide: true },
       (err, stdout) => {
         const out = String(stdout || '').trim();
@@ -118,9 +214,12 @@ function rtkRewrite(command) {
         } else if (err.killed) {
           warn(`rewrite timed out after ${REWRITE_TIMEOUT_MS}ms; running command unrewritten`);
         } else if (Number(err.code) === 1) {
-          // rtk's documented "no equivalent" exit: silent pass-through.
-        } else if (out) {
-          // e.g. exit 3: rtk printed the (possibly identity) rewritten form.
+          // No rewrite: silent pass-through.
+        } else if (Number(err.code) === 2) {
+          // Deny rule matched. Anything on stdout is a pipeline-rule message,
+          // never a command line, so it must not be handed to the shell.
+        } else if (Number(err.code) === 3 && out) {
+          // 3 = rewritten, approval deferred to the host. The normal case.
           resolve(out);
           return;
         } else {
@@ -134,23 +233,30 @@ function rtkRewrite(command) {
 
 export default class RtkPwshExecutor extends SandboxPwshExecutor {
   async execute(spec) {
-    // rtk's own single-command opt-out: RTK_DISABLED=1 skips rewriting.
+    // This plugin's own global kill switch (rtk itself has no equivalent
+    // environment variable — only the `RTK_DISABLED=` command-text prefix).
     if (process.env.RTK_DISABLED === '1') return super.execute(spec);
     // Never rewrite an rtk invocation (recursion guard).
-    const trimmed = spec.command.trimStart();
-    if (trimmed.startsWith('rtk ') || trimmed.startsWith('rtk.exe ')) {
-      return super.execute(spec);
-    }
+    if (isRtkInvocation(spec.command)) return super.execute(spec);
+    // Only the rewrite is fail-open. super.execute stays outside the try:
+    // an AbortError from a cancelled call, or a SandboxUnavailableError from a
+    // confinement runner that never came up, must reach the caller unchanged.
+    // Swallowing those would both run a cancelled command and downgrade a
+    // sandbox failure to a warning — and the fallback below would submit the
+    // command a second time.
+    let rewritten = null;
     try {
-      const rewritten = await rtkRewrite(spec.command);
-      if (rewritten && rewritten !== spec.command) {
-        log(JSON.stringify(spec.command), '->', JSON.stringify(rewritten));
-        // Spread keeps workdir/timeoutMs/signal/stdin/env and the sandbox
-        // policy fields resolve() stamped; only the command text changes.
-        return await super.execute({ ...spec, command: rewritten });
-      }
+      rewritten = await rtkRewrite(spec.command);
     } catch (err) {
       warn(`rewrite failed (${err?.message ?? err}); running command unrewritten`);
+    }
+    // rtk does not suppress identity rewrites, so this comparison is the only
+    // thing standing between us and re-running the same command text.
+    if (rewritten && rewritten !== spec.command) {
+      log(JSON.stringify(spec.command), '->', JSON.stringify(rewritten));
+      // Spread keeps workdir/timeoutMs/signal/stdin/env and the sandbox
+      // policy fields resolve() stamped; only the command text changes.
+      return super.execute({ ...spec, command: rewritten });
     }
     return super.execute(spec);
   }
