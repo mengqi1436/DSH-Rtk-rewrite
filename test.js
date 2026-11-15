@@ -976,6 +976,8 @@ async function main() {
       check(G_H, '候选路径含 POSIX lib/node_modules 布局', cands.some((p) => p.includes('lib') && p.includes('node_modules')), JSON.stringify(cands));
       check(G_H, '候选路径含 Electron app.asar 布局',
         cands.some((p) => p.includes('resources') && p.includes('app.asar') && p.includes('dsh')), JSON.stringify(cands));
+      check(G_H, '内核解析含 npm -g shim 布局链（argv[1] 推导，服务器无头安装必需）',
+        readFileSync(path.join(ROOT, 'index.js'), 'utf8').includes('process.argv[1]'), '');
 
       const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
       check(G_H, 'package.json 声明 dsh.bundle.patch', pkg.dsh?.bundle?.patch === './cordis.patch.yml', JSON.stringify(pkg.dsh));

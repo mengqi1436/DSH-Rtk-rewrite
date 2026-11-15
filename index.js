@@ -98,7 +98,25 @@ function resolveDshPackageJson() {
     return createRequire(import.meta.url).resolve('@deepseek-ai/dsh/package.json');
   } catch { /* dsh itself not installed as a dependency */ }
   const nodeDir = path.dirname(process.execPath);
-  for (const candidate of dshPackageJsonCandidates(nodeDir)) {
+  const candidates = [...dshPackageJsonCandidates(nodeDir)];
+  // npm -g shim layouts: the dsh CLI starts as `node <prefix>/bin/dsh`, so
+  // process.argv[1] names the shim while node itself may live under nvm or
+  // /usr/bin — none of the execPath-based chains above can reach the kernel,
+  // which npm installs into the prefix's own node_modules (POSIX global:
+  // <prefix>/lib/node_modules, Windows global: <prefix>/node_modules). This is
+  // the layout headless-server installs actually use; without it the module
+  // throws at import time and the patch silently falls back to the native
+  // shell (observed on a Ubuntu server, dsh 0.2.2-rc.1, 2026-11-15).
+  const entryArg = process.argv[1];
+  if (entryArg) {
+    const entryDir = path.dirname(path.resolve(entryArg));
+    candidates.push(
+      path.join(entryDir, '..', 'lib', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+      path.join(entryDir, '..', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+      path.join(entryDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+    );
+  }
+  for (const candidate of candidates) {
     try {
       if (existsSync(candidate)) return candidate;
     } catch { /* unreadable path */ }
