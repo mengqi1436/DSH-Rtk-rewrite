@@ -1,11 +1,12 @@
 {
     "schema_version": 2,
-    "commit": "5de9afaa3e119a5dc351135abd63f12e2c46b2a2",
-    "indexed_at": "2026-11-08T07:36:02Z",
+    "commit": "c6cc64af484703729d4574c718824b158ef0fbc5",
+    "indexed_at": "2026-11-15T07:12:39Z",
     "project": "D-Code-DSH-Rtk-rewrite",
     "nodes": 770,
     "edges": 1468,
     "original_size": 3932160,
-    "compressed_size": 450766,
-    "compression_level": 9
+    "compressed_size": 450639,
+    "compression_level": 9,
+    "reconcile_basis": "git-clean-head"
 }

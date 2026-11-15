@@ -2,9 +2,10 @@
 
 [English](./README.md) | **中文**
 
-DeepSeek Harness（DSH）原生 [rtk](https://github.com/rtk-ai/rtk) 桥接插件：把桌面端
-profile 的 shell 执行器替换为 rtk 改写子类，**所有 pwsh shell 命令在执行前经
-`rtk rewrite "<cmd>"` 透明改写**，让 rtk 的紧凑输出格式直接为每次工具调用节省 token。
+DeepSeek Harness（DSH）原生 [rtk](https://github.com/rtk-ai/rtk) 桥接插件：把当前平台的
+默认 shell 执行器替换为 rtk 改写子类，**所有 shell 命令在执行前经
+`rtk rewrite "<cmd>"` 透明改写**——Windows 上是 pwsh，Linux/macOS 上是 bash——
+让 rtk 的紧凑输出格式直接为每次工具调用节省 token。
 
 已在本机实测验证（2026-09-25，dsh 0.1.7-rc.2 + rtk 0.50.0 + Node v24.19.0）：
 
@@ -22,6 +23,12 @@ profile 的 shell 执行器替换为 rtk 改写子类，**所有 pwsh shell 命�
 2026-11-08 在本机重新确认（Windows 11 10.0.26300 + rtk 1.1.0 + Node v26.13.0 +
 DSH 桌面端 0.2.2-rc.1）：退出码契约未变，下文命令族表的全部条目即当日用
 `rtk rewrite` 实测得出。
+
+**v1.2.0 起支持多端**：Linux/macOS 上插件改为子类化 `SandboxBashExecutor`
+（`@deepseek-ai/dsh-bash-sandbox`），与内核自身的 shell 选择逻辑对齐
+（`dsh-settings`：`win32 ? pwsh-sandbox : bash-sandbox`），也与 base bundle 里两行
+带平台互斥 guard 的执行器注册对齐。bash 侧行为由测试 I 组锁定（22 项：基类解析、
+改写链路、递归防护、失败安全、spec 透传），对每个模拟平台走真实模块加载路径执行。
 
 **不用白名单、不用逐命令配置、不用注册任何东西。** 插件把整条命令字符串交给
 `rtk rewrite`，rtk 返回什么就用什么，所以覆盖范围**等于你装的 rtk 认识的范围**——
@@ -60,6 +67,15 @@ rtk 按生态把过滤器放在 `src/cmds/` 下
 `cat`）。这是预期行为：没有等价意味着没有收益，不是出错。
 
 ## 兼容性验证
+
+**`@deepseek-ai/dsh-bash-sandbox`**（Linux/macOS 侧基类，v1.2.0 起）：bash 沙箱
+执行器与 pwsh 版结构完全对称——`SandboxBashExecutor` 继承 `LocalBashExecutor`，
+同样暴露 `execute(spec)` 覆写点与 `resolve()` 策略印章，且
+`LocalBashExecutor.execute` 就是 `executeArgv(spec, ["bash", "-c", spec.command])`
+（对照桌面 asar 内 0.2.2-rc.3 内核源码核实；`dsh-base/cordis.patch.yml` 用
+`disabled: !!js` 平台 guard 注册两行执行器）。bash peer 范围为
+`>=0.2.0-rc.1 <0.3.0-0`——0.2.2-rc.3 在 `includePrerelease` 下满足、默认 semver
+语义下正确排除，与 pwsh peer 性质一致。
 
 **0.2.0 兼容性**（2026-09-29 验证）：`@deepseek-ai/dsh-pwsh-sandbox@0.2.0-rc.1`
 与 `0.1.7-rc.2` 的 `lib/index.js` **逐字节相同**（252 行 0 差异），`SandboxPwshExecutor`
@@ -129,7 +145,10 @@ tree 比对，`packages/shell/**`、`packages/sandbox/**`、`packages/subprocess
 - **`rtk rewrite` 子命令可用**且在 PATH 上（上游参考 hook 标注 `Requires: rtk >= 0.23.0`；
   可用 `RTK_BIN` 环境变量指定别名或非 PATH 安装）。契约已对照 rtk 0.50.0 实测、
   2026-10-03 对照 0.51.0 复核、2026-11-08 再对照 1.1.0 复核：退出码语义全程未变。
-- Windows + PowerShell（插件替换的是 pwsh 执行器；bash/其他 shell 工具不受影响）
+- Windows + PowerShell **或** Linux/macOS + bash：win32 上插件替换 pwsh 执行器
+  （`SandboxPwshExecutor`）；linux/darwin 上替换 bash 执行器（`SandboxBashExecutor`）
+  ——与内核 base bundle 注册的两行执行器及其平台互斥 guard 完全对应。其他 shell
+  工具不受影响。
 
 ## rtk 版本兼容性
 
@@ -141,6 +160,10 @@ tree 比对，`packages/shell/**`、`packages/sandbox/**`、`packages/subprocess
 | 0.50.0 | 2026-09-25 | 支持的命令 exit 3 + stdout，其余 exit 1 无输出 |
 | 0.51.0 | 2026-10-03 | 不变 |
 | 1.1.0（本机） | 2026-11-08 | 不变；上文命令族表的全部实测即基于此版本 |
+
+插件本身与平台无关：它只消费 `rtk rewrite` 的**进程契约**（退出码 + stdout），同一
+rtk 版本的 Windows/Linux/macOS 构建契约一致。Linux 特有的问题（非登录 SSH shell 的
+PATH、老 CPU 需源码编译）属于 rtk 侧，见[安装 / 卸载](#安装--卸载)。
 
 **上游 `develop` 跑到发布线前面，这不构成兼容性问题。** 当前上游 `develop` 停在 tag
 `dev-1.2.0-rc.620`，而它自己的 `Cargo.toml` 仍写 `0.49.0`、`CHANGELOG.md` 也止于
@@ -159,10 +182,16 @@ tree 比对，`packages/shell/**`、`packages/sandbox/**`、`packages/subprocess
 DSH 的插件体系（cordis）允许一个 bundle 通过 patch 声明替换服务行。
 每个 context 只允许一个 `ctx.shell` 实现，因此 patch 做两件事：
 
-1. **禁用原执行器**：`- id: pwsh-sandbox / disabled: true`
-2. **插入本插件**：`insert: - id: rtk-pwsh-shell / name: 'dsh-pwsh-rtk-rewrite'`
+1. **禁用平台自身的执行器行**：`- id: pwsh-sandbox / disabled: true` 与
+   `- id: bash-sandbox / disabled: true`——两行在内核 base bundle
+   （`dsh-base/cordis.patch.yml`）里本就带平台 guard，禁用非本平台那行是幂等空操作
+2. **每平台插入一行本插件**：`insert:` 里 `id: rtk-pwsh-shell`
+   （`disabled: !!js process.platform !== 'win32'`）与 `id: rtk-bash-shell`
+   （`disabled: !!js process.platform === 'win32'`）——同一个包 default 导出，
+   按平台解析到对应基类
 
-加载后 shell 能力由 `RtkPwshExecutor` 提供，执行流程：
+加载后 shell 能力由 `RtkShellExecutor` 提供：win32 上继承 `SandboxPwshExecutor`，
+linux/darwin 上继承 `SandboxBashExecutor`。执行流程：
 
 ```
 execute(spec)
@@ -175,7 +204,8 @@ execute(spec)
   │    ├─ exit 2            ──► rtk deny 规则命中，原样执行
   │    ├─ ENOENT            ──► rtk 不在 PATH，警告一次后原样执行
   │    └─ 超时/其他失败      ──► 原样执行
-  └─ super.execute(spec)   （SandboxPwshExecutor：沙箱 confine 包住改写后命令）
+  └─ super.execute(spec)  （SandboxPwshExecutor / SandboxBashExecutor：
+                           沙箱 confine 包住改写后命令）
 ```
 
 ### 失败安全语义
@@ -186,7 +216,7 @@ execute(spec)
 | 情形 | 插件行为 |
 |------|----------|
 | rtk 未安装 / 不在 PATH（ENOENT） | 每个进程**只警告一次**，随后执行原命令 |
-| rtk 无等价（exit 1） | 静默透传——这是 pwsh cmdlet（`Get-ChildItem`、`Write-Output`、`echo`、`env`）的常态 |
+| rtk 无等价（exit 1） | 静默透传——pwsh cmdlet（`Get-ChildItem`、`Write-Output`）与 rtk 未建模的 bash 内建/别名（`echo`、`env`、`pwd`）的常态 |
 | rtk deny 规则命中（exit 2） | 透传；权限决策属于宿主，不属于本插件 |
 | rtk 超过 5s 预算 | 警告、杀掉子进程、执行原命令 |
 | rtk 出现上游未定义的退出码或崩溃 | 丢弃 stdout，执行原命令——无法识别的码一律不当成改写 |
@@ -201,13 +231,21 @@ execute(spec)
 
 ### 关键设计决策
 
+- **平台映射与内核对齐**：`resolveCorePackage()` 在 win32 返回
+  `@deepseek-ai/dsh-pwsh-sandbox`/`SandboxPwshExecutor`，其余平台返回
+  `@deepseek-ai/dsh-bash-sandbox`/`SandboxBashExecutor`——与 `dsh-settings` 的默认
+  选择、与 base bundle 两行带平台互斥 guard 的执行器注册完全对应。两类包在每种
+  内核安装（桌面 asar 与 CLI）里都有，一条解析链服务两个平台；平台在模块加载时
+  读取一次（`RTK_TEST_PLATFORM` 仅验证套件使用）。
 - **失败安全**：任何改写失败（rtk 缺失、无等价、超时、异常）都跑原命令，
   绝不阻塞或拒绝执行。插件只做「锦上添花」，永远不影响可用性。
 - **沙箱语义完整保留**：只覆写 `execute(spec)`，`resolve()`（沙箱 policy stamp）
   不动；用展开 `{ ...spec, command: rewritten }` 传递，workdir/timeoutMs/signal/
   stdin/env 与沙箱字段全部原样。沙箱 confine 包裹的是**改写后**的命令。
 - **spec.command 是原始命令**：UTF-8 preamble 在 `PwshLocalExecutor` 的 spawnSpec
-  层才拼接，`execute()` 看到的命令文本可安全直接喂给 `rtk rewrite`。
+  层才拼接；`LocalBashExecutor` 完全没有 preamble——它的 `execute(spec)` 就是
+  `executeArgv(spec, ["bash", "-c", spec.command])`——两个平台的 `execute()` 看到的
+  命令文本都可安全直接喂给 `rtk rewrite`。
 - **内置包从 dsh 本体安装路径解析**：npm 上的
   `@deepseek-ai/dsh-pwsh-sandbox` 版本常落后或超前于本机 dsh 运行时
   （registry 曾长期停在 0.1.5-rc.3，0.2.0 起恢复发布但与桌面版装配仍可能错位），
@@ -273,6 +311,15 @@ dsh plugin --profile desktop remove dsh-pwsh-rtk-rewrite
 `<桌面端安装目录>\resources\app.asar\dsh\node_modules\@deepseek-ai\dsh\package.json`；
 升级到 v1.1.3 即无需此变量。
 
+**Linux / macOS（DSH CLI profile，如无头服务器）**：安装与钉版本方式相同
+（`dsh plugin --profile <名字> add dsh-pwsh-rtk-rewrite@<精确版本>
+--registry=https://registry.npmjs.org/`），重启 harness 即可，bash 侧
+（`rtk-bash-shell` 行）自动接管。两条 Linux 特有注意点：SSH `exec` 通道是非登录
+shell、可能不加载 `~/.profile`，此时在 harness 启动环境里显式设
+`RTK_BIN=/home/<你>/.local/bin/rtk`；rtk 官方 Linux 构建以较新的 x86-64 基线
+（AVX2）编译，老 CPU 需按上游 INSTALL.md 源码编译（已在 Pentium G2020 / Ivy Bridge
+机器上以 rtk 1.2.0 验证可行）。
+
 **验证**：重启桌面端后跑一条 rtk 必认识的命令（如 `git status`），对比
 `rtk gain` 的 Total commands 计数上升即生效；或在工具输出中看到 rtk 紧凑格式。
 
@@ -287,8 +334,9 @@ dsh plugin --profile desktop remove dsh-pwsh-rtk-rewrite
 - **自定义 rtk 二进制**：`RTK_BIN=/path/to/rtk`（或 `RTK_BIN=rtk.exe`）让插件指向一个
   不在 PATH 上的 rtk——不同版本、nightly 构建或包装脚本都行。插件就 spawn 这个路径，
   其它配置无需改动。
-- **整行停用**：profile patch 中 override `rtk-pwsh-shell` 行 `disabled: true`，
-  并恢复 `pwsh-sandbox` 行 `disabled: false`
+- **整行停用**：profile patch 中 override `rtk-pwsh-shell`（Windows）或
+  `rtk-bash-shell`（Linux/macOS）行 `disabled: true`，并恢复平台自身的
+  `pwsh-sandbox` / `bash-sandbox` 行 `disabled: false`
 
 ## 已知局限
 
@@ -312,7 +360,7 @@ dsh plugin --profile desktop remove dsh-pwsh-rtk-rewrite
 ## 验证
 
 ```powershell
-node test.js               # 零依赖套件，8 组（项数随覆盖增加，以末尾统计行为准）
+node test.js               # 零依赖套件，9 组（项数随覆盖增加，以末尾统计行为准）
                            #   A rewrite 退出码契约（注入假 rtk）
                            #   B rtk 缺失 / 只告警一次
                            #   C 递归防护
@@ -321,6 +369,8 @@ node test.js               # 零依赖套件，8 组（项数随覆盖增加，�
                            #   F 复合命令与管道（真 rtk）
                            #   G 命令族冒烟（12 个族全覆盖，真 rtk）
                            #   H 模块契约（导出、package.json、patch 文件）
+                           #   I 多端 bash 执行器（经 RTK_TEST_PLATFORM 跑 linux/darwin
+                           #      分支，走真实模块加载路径）
 ```
 
 套件通过 `RTK_BIN` 注入一个**假 rtk**——一个 `rewrite` 脚本，退出码、stdout 与时序由
@@ -355,10 +405,11 @@ rtk rewrite "Get-ChildItem"       # exit 1，无输出
 ## 文件结构
 
 ```
-├── index.js          # RtkPwshExecutor（唯一源码：isRtkInvocation + rtkRewrite + execute）
-├── cordis.patch.yml  # bundle patch：禁用 pwsh-sandbox + 插入 rtk-pwsh-shell
+├── index.js          # RtkShellExecutor（按平台映射：
+│                     # isRtkInvocation + rtkRewrite + execute；win32 → pwsh 基类，其余 → bash 基类）
+├── cordis.patch.yml  # bundle patch：禁用 pwsh/bash-sandbox + 插入 rtk-pwsh-shell / rtk-bash-shell
 ├── package.json      # dsh.bundle.patch 指向 patch 文件；无运行时 npm 依赖
-├── test.js           # 零依赖验证套件（8 组）
+├── test.js           # 零依赖验证套件（9 组）
 ├── README.md         # English
 └── README_zh.md      # 中文（本文件）
 ```

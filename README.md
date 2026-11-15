@@ -3,9 +3,10 @@
 **English** | [中文](./README_zh.md)
 
 A native [rtk](https://github.com/rtk-ai/rtk) bridge plugin for DeepSeek Harness (DSH):
-it replaces the desktop profile's shell executor with an rtk-rewriting subclass, so
-**every pwsh shell command is transparently rewritten through `rtk rewrite "<cmd>"`
-before execution**, letting rtk's compact output format save tokens on every tool call.
+it replaces the platform's default shell executor with an rtk-rewriting subclass, so
+**every shell command is transparently rewritten through `rtk rewrite "<cmd>"`
+before execution** — pwsh on Windows, bash on Linux/macOS — letting rtk's compact
+output format save tokens on every tool call.
 
 Verified on a real machine (2026-09-25, dsh 0.1.7-rc.2 + rtk 0.50.0 + Node v24.19.0):
 
@@ -23,6 +24,13 @@ matching the 3 rewrite log lines in dsh-web.log one to one).
 Re-confirmed on this machine 2026-11-08 (Windows 11 10.0.26300 + rtk 1.1.0 + Node
 v26.13.0 + DSH desktop 0.2.2-rc.1): the exit-code contract is unchanged, and the whole
 command-family table below was measured with `rtk rewrite` on that same day.
+
+**Multi-platform since v1.2.0**: on Linux/macOS the plugin subclasses
+`SandboxBashExecutor` (`@deepseek-ai/dsh-bash-sandbox`), mirroring the kernel's own
+shell selection (`dsh-settings`: `win32 ? pwsh-sandbox : bash-sandbox`) and the base
+bundle's two platform-guarded executor lines. The bash-side behaviour is locked by
+test group I (22 checks: base-class resolution, rewrite pipeline, recursion guard,
+fail-open, spec passthrough), run through the real module-loading path per platform.
 
 **No allow-list, no per-command config, nothing to register.** The plugin forwards the
 whole command string to `rtk rewrite` and uses whatever rtk returns, so coverage equals
@@ -66,6 +74,16 @@ write redirect such as `git status > out.txt`, `gh` with `--json`, `cat` with fl
 than `-n`). That is expected: no equivalent means no savings, not a failure.
 
 ## Compatibility
+
+**`@deepseek-ai/dsh-bash-sandbox`** (the Linux/macOS base, since v1.2.0): the bash
+sandbox executor is the structural twin of the pwsh one — `SandboxBashExecutor`
+extends `LocalBashExecutor`, exposes the same `execute(spec)` override point and
+`resolve()` policy stamp, and `LocalBashExecutor.execute` is literally
+`executeArgv(spec, ["bash", "-c", spec.command])` (verified against the 0.2.2-rc.3
+kernel sources inside the desktop asar; `dsh-base/cordis.patch.yml` registers both
+executor lines with `disabled: !!js` platform guards). The bash peer range is
+`>=0.2.0-rc.1 <0.3.0-0` — 0.2.2-rc.3 satisfies it with `includePrerelease` and the
+default semver semantics correctly reject it, the same property the pwsh peer has.
 
 **0.2.0** (verified 2026-09-29): `@deepseek-ai/dsh-pwsh-sandbox@0.2.0-rc.1`'s
 `lib/index.js` is **byte-identical** to `0.1.7-rc.2` (252 lines, 0 diff). The
@@ -158,8 +176,10 @@ in group H). After installing v1.1.3,
   alias or a non-PATH install). Contract verified against rtk 0.50.0, re-verified
   against 0.51.0 on 2026-10-03, and re-verified again against rtk 1.1.0 on 2026-11-08:
   exit-code semantics unchanged throughout.
-- Windows + PowerShell (the plugin replaces the pwsh executor; bash/other shell
-  tools are unaffected)
+- Windows + PowerShell **or** Linux/macOS + bash: on win32 the plugin replaces the
+  pwsh executor (`SandboxPwshExecutor`); on linux/darwin it replaces the bash
+  executor (`SandboxBashExecutor`) — the same two base-bundle lines the kernel
+  registers with mutually exclusive platform guards. Other shell tools are unaffected.
 
 ## rtk version compatibility
 
@@ -172,6 +192,12 @@ internals. That contract has been stable across every version probed:
 | 0.50.0 | 2026-09-25 | exit 3 + stdout for a supported command, exit 1 + no output otherwise |
 | 0.51.0 | 2026-10-03 | unchanged |
 | 1.1.0 (this machine) | 2026-11-08 | unchanged; also the version the full command-family table above was measured on |
+
+The plugin itself is platform-agnostic: it consumes only the `rtk rewrite` **process
+contract** (exit code + stdout), which is identical across the Windows, Linux and
+macOS builds of the same rtk version. Linux-specific concerns (PATH on non-login SSH
+shells, source builds for pre-AVX2 CPUs) are rtk-side and covered in
+[Install / Uninstall](#install--uninstall).
 
 **Upstream `develop` runs ahead of the release line and that is not a compatibility
 problem.** At the time of writing, upstream `develop` sits at tag `dev-1.2.0-rc.620`
@@ -195,10 +221,17 @@ DSH's plugin system (cordis) lets a bundle replace service lines via a patch
 declaration. Each context allows exactly one `ctx.shell` implementation, so the
 patch does two things:
 
-1. **Disable the original executor**: `- id: pwsh-sandbox / disabled: true`
-2. **Insert this plugin**: `insert: - id: rtk-pwsh-shell / name: 'dsh-pwsh-rtk-rewrite'`
+1. **Disable the platform's own executor lines**: `- id: pwsh-sandbox / disabled: true`
+   and `- id: bash-sandbox / disabled: true` — each is already platform-gated by the
+   kernel's base bundle (`dsh-base/cordis.patch.yml`), so disabling the off-platform
+   one is an idempotent no-op
+2. **Insert this plugin once per platform**: `insert:` with `id: rtk-pwsh-shell`
+   (`disabled: !!js process.platform !== 'win32'`) and `id: rtk-bash-shell`
+   (`disabled: !!js process.platform === 'win32'`) — the same package default export,
+   resolved against the platform's base class
 
-Once loaded, shell capability is provided by `RtkPwshExecutor`:
+Once loaded, shell capability is provided by `RtkShellExecutor`, which extends
+`SandboxPwshExecutor` on win32 and `SandboxBashExecutor` on linux/darwin:
 
 ```
 execute(spec)
@@ -211,7 +244,8 @@ execute(spec)
   │    ├─ exit 2            ──► rtk deny rule matched, run as-is
   │    ├─ ENOENT            ──► rtk not on PATH, warn once then run as-is
   │    └─ timeout/other     ──► run as-is
-  └─ super.execute(spec)   (SandboxPwshExecutor: sandbox confine wraps the rewritten command)
+  └─ super.execute(spec)  (SandboxPwshExecutor / SandboxBashExecutor:
+                           sandbox confine wraps the rewritten command)
 ```
 
 ### Failure safety
@@ -223,7 +257,7 @@ the sandbox:
 | Situation | What the plugin does |
 |-----------|----------------------|
 | rtk not installed / not on PATH (ENOENT) | warns **once** per process, then runs the original command |
-| rtk has no equivalent (exit 1) | silent pass-through — this is the normal case for pwsh cmdlets (`Get-ChildItem`, `Write-Output`, `echo`, `env`) |
+| rtk has no equivalent (exit 1) | silent pass-through — the normal case for pwsh cmdlets (`Get-ChildItem`, `Write-Output`) and for bash builtins/aliases rtk does not model (`echo`, `env`, `pwd`) |
 | rtk deny rule matched (exit 2) | pass-through; permission decisions belong to the host, not to this plugin |
 | rtk hangs past the 5 s budget | warns, kills the child, runs the original command |
 | rtk exits with a code upstream does not define, or crashes | stdout is discarded and the original command runs — an unrecognised code is never trusted as a rewrite |
@@ -240,6 +274,14 @@ a warning and runs the original command.
 
 ### Key Design Decisions
 
+- **Platform mapping mirrors the kernel**: `resolveCorePackage()` returns
+  `@deepseek-ai/dsh-pwsh-sandbox`/`SandboxPwshExecutor` on win32 and
+  `@deepseek-ai/dsh-bash-sandbox`/`SandboxBashExecutor` otherwise — the same pair
+  `dsh-settings` uses for its default and the same two base-bundle lines with
+  mutually exclusive platform guards. Both packages ship in every kernel install
+  (desktop asar and CLI alike), so one resolution chain serves both platforms; the
+  platform is read once at import time (`RTK_TEST_PLATFORM` exists for the
+  verification suite only).
 - **Fail-safe**: any rewrite failure (rtk missing, no equivalent, timeout, error)
   runs the original command. Execution is never blocked or denied by this plugin —
   it is purely additive.
@@ -248,8 +290,10 @@ a warning and runs the original command.
   `{ ...spec, command: rewritten }`, keeping workdir/timeoutMs/signal/stdin/env and
   all sandbox fields intact. The sandbox confine wraps the **rewritten** command.
 - **`spec.command` is the raw command**: the UTF-8 preamble is only prepended at the
-  spawnSpec layer inside `PwshLocalExecutor` (lib/index.js), so the command text seen
-  by `execute()` is safe to feed to `rtk rewrite` directly.
+  spawnSpec layer inside `PwshLocalExecutor` (lib/index.js), and `LocalBashExecutor`
+  has no preamble at all — its `execute(spec)` is literally
+  `executeArgv(spec, ["bash", "-c", spec.command])` — so the command text seen by
+  `execute()` is safe to feed to `rtk rewrite` directly on both platforms.
 - **The bundled package resolves from the dsh install itself**: the npm copy of
   `@deepseek-ai/dsh-pwsh-sandbox` often lags (or diverges from) the copy shipped
   inside the running host (the registry sat at 0.1.5-rc.3 for a long stretch; 0.2.0
@@ -332,6 +376,16 @@ fires); the manual workaround was setting `DSH_INSTALL_PACKAGE_JSON` in the
 `<desktop install dir>\resources\app.asar\dsh\node_modules\@deepseek-ai\dsh\package.json`.
 Upgrading to v1.1.3 removes the need for that variable.
 
+**Linux / macOS (DSH CLI profiles, e.g. a headless server)**: install and pin the
+same way (`dsh plugin --profile <name> add dsh-pwsh-rtk-rewrite@<exact version>
+--registry=https://registry.npmjs.org/`) and restart the harness; the bash side
+(`rtk-bash-shell` line) takes over automatically. Two Linux-specific notes: SSH
+`exec` channels are non-login shells that may not source `~/.profile`, so when the
+harness is launched from such a context set `RTK_BIN` to the absolute rtk path
+(e.g. `/home/<you>/.local/bin/rtk`); and rtk's official Linux builds target a newer
+x86-64 baseline (AVX2), so on older CPUs build rtk from source per upstream
+INSTALL.md (verified working on a Pentium G2020 / Ivy Bridge box with rtk 1.2.0).
+
 **Verify**: after restarting the desktop app, run a command rtk definitely knows
 (e.g. `git status`) and check that `rtk gain`'s Total commands count climbs — or look
 for rtk's compact format in the tool output.
@@ -348,8 +402,9 @@ works as usual; **restart the desktop app** after installation.
 - **Custom rtk binary**: `RTK_BIN=/path/to/rtk` (or `RTK_BIN=rtk.exe`) points the
   plugin at an rtk that is not on PATH — a different version, a nightly build, or a
   wrapper script. The plugin spawns exactly that path; no other configuration changes.
-- **Whole line**: in the profile patch, override the `rtk-pwsh-shell` line with
-  `disabled: true` and restore the `pwsh-sandbox` line with `disabled: false`
+- **Whole line**: in the profile patch, override the `rtk-pwsh-shell` (Windows) or
+  `rtk-bash-shell` (Linux/macOS) line with `disabled: true`, and restore the
+  platform's own `pwsh-sandbox` / `bash-sandbox` line with `disabled: false`
 
 ## Known limitations
 
@@ -377,7 +432,7 @@ correctness — the original command always runs when there is no equivalent:
 ## Verification
 
 ```powershell
-node test.js               # zero-dependency suite, 8 groups (check count grows as
+node test.js               # zero-dependency suite, 9 groups (check count grows as
                            # coverage is added; printed in the final tally line)
 node test.js               #   A rewrite exit-code contract (injected fake rtk)
                            #   B rtk missing / warn-once
@@ -387,6 +442,8 @@ node test.js               #   A rewrite exit-code contract (injected fake rtk)
                            #   F compound commands & pipelines (real rtk)
                            #   G command-family smoke (all 12 families, real rtk)
                            #   H module contract (exports, package.json, patch file)
+                           #   I multi-platform bash executor (linux/darwin branches
+                           #      via RTK_TEST_PLATFORM, real module-loading path)
 ```
 
 The suite injects a **fake rtk** through `RTK_BIN` — a small `rewrite` script whose exit
@@ -427,10 +484,11 @@ rtk rewrite "Get-ChildItem"       # exit 1, prints nothing
 ## File Layout
 
 ```
-├── index.js          # RtkPwshExecutor (only source: isRtkInvocation + rtkRewrite + execute)
-├── cordis.patch.yml  # bundle patch: disable pwsh-sandbox + insert rtk-pwsh-shell
+├── index.js          # RtkShellExecutor, platform-mapped
+│                     # (isRtkInvocation + rtkRewrite + execute; win32 → pwsh base, else bash base)
+├── cordis.patch.yml  # bundle patch: disable pwsh/bash-sandbox + insert rtk-pwsh-shell / rtk-bash-shell
 ├── package.json      # dsh.bundle.patch points at the patch file; no runtime dependencies
-├── test.js           # zero-dependency verification suite (8 groups)
+├── test.js           # zero-dependency verification suite (9 groups)
 ├── README.md         # English (this file)
 └── README_zh.md      # 中文
 ```

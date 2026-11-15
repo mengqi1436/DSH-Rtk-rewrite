@@ -1,7 +1,7 @@
 {
   "name": "dsh-pwsh-rtk-rewrite",
   "version": "1.1.9",
-  "description": "DSH shell executor that transparently rewrites commands through `rtk rewrite` before execution (sandbox semantics preserved).",
+  "description": "DSH shell executor that transparently rewrites commands through `rtk rewrite` before execution on every platform (pwsh on Windows, bash on Linux/macOS; sandbox semantics preserved).",
   "type": "module",
   "exports": {
     ".": "./index.js"
@@ -18,6 +18,10 @@
     "rtk",
     "deepseek-harness",
     "shell",
+    "bash",
+    "linux",
+    "macos",
+    "cross-platform",
     "token-savings"
   ],
   "license": "MIT",
@@ -30,9 +34,13 @@
     "node": ">=20"
   },
   "peerDependencies": {
+    "@deepseek-ai/dsh-bash-sandbox": ">=0.2.0-rc.1 <0.3.0-0",
     "@deepseek-ai/dsh-pwsh-sandbox": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0 || 0.1.7-rc.2 || >=0.2.0-rc.1 <0.3.0-0"
   },
   "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-bash-sandbox": {
+      "optional": true
+    },
     "@deepseek-ai/dsh-pwsh-sandbox": {
       "optional": true
     }

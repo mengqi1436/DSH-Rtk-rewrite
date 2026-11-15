@@ -1,17 +1,28 @@
 /**
  * DSH native rtk bridge — a `ctx.shell` provider that transparently rewrites
- * every shell command through `rtk rewrite "<cmd>"` before execution.
+ * every shell command through `rtk rewrite "<cmd>"` before execution, on
+ * every platform DSH runs on.
+ *
+ * Platform mapping (mirrors the kernel's own shell selection,
+ * dsh-settings/lib/index.js: `shell: process.platform === "win32" ?
+ * "pwsh-sandbox" : "bash-sandbox"`, and the base bundle dsh-base/cordis.patch.yml
+ * which registers both lines with mutually exclusive platform guards):
+ *   - win32:          extends SandboxPwshExecutor (@deepseek-ai/dsh-pwsh-sandbox)
+ *   - linux / darwin: extends SandboxBashExecutor (@deepseek-ai/dsh-bash-sandbox)
  *
  * Design (per the deepseek-harness official plugin model):
- *  - `SandboxPwshExecutor` (@deepseek-ai/dsh-pwsh-sandbox) already owns the
- *    full local pwsh + sandbox-confinement pipeline: resolve() stamps the
- *    per-call sandbox policy, execute() wraps the pwsh argv via ctx.sandbox.
- *  - We subclass it and only intercept execute(): rewrite spec.command first,
- *    then hand the rewritten spec to super.execute(), so confinement wraps the
+ *  - Both base classes expose the same seam (docs/subsystems/shell.md: "Subclass,
+ *    implement the abstract methods, and load the subclass as a plugin"):
+ *    resolve() stamps the per-call sandbox policy, execute() wraps the platform
+ *    shell argv via ctx.sandbox.
+ *  - We subclass and intercept only execute(): rewrite spec.command first, then
+ *    hand the rewritten spec to super.execute(), so confinement wraps the
  *    rewritten command and all sandbox facts/accounting stay intact.
- *  - The UTF-8 output preamble is prepended at the spawnSpec layer inside
- *    PwshLocalExecutor (lib/index.js), so spec.command seen here is the raw
- *    command — safe to feed to `rtk rewrite` directly.
+ *  - `spec.command` is the raw command on both platforms: the UTF-8 output
+ *    preamble is prepended at the spawnSpec layer inside PwshLocalExecutor
+ *    (lib/index.js), and LocalBashExecutor has no preamble at all — its
+ *    execute(spec) is just `executeArgv(spec, ["bash", "-c", spec.command])` —
+ *    so the command text seen here is safe to feed to `rtk rewrite` directly.
  *  - Failure safety: any rewrite failure (rtk missing, exit 1 = no equivalent,
  *    exit 2 = deny, timeout) runs the original command unrewritten. Execution
  *    is never blocked or denied by this plugin. That tolerance covers the
@@ -32,16 +43,27 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
 
-const CORE_PACKAGE = '@deepseek-ai/dsh-pwsh-sandbox';
+/**
+ * Per-platform base executor, mirroring the kernel's own shell selection.
+ * `RTK_TEST_PLATFORM` lets the verification suite load the non-Windows class
+ * on a Windows runner; the module reads it once at import time, so leave it
+ * unset in production.
+ */
+export function resolveCorePackage(platform = process.env.RTK_TEST_PLATFORM || process.platform) {
+  return platform === 'win32'
+    ? { package: '@deepseek-ai/dsh-pwsh-sandbox', export: 'SandboxPwshExecutor' }
+    : { package: '@deepseek-ai/dsh-bash-sandbox', export: 'SandboxBashExecutor' };
+}
 
 /**
- * Resolve the dsh-shipped `@deepseek-ai/dsh-pwsh-sandbox` from the running
- * dsh installation. The npm registry copy of this package often lags (or
- * diverges from) the copy shipped inside the running host (it sat at
- * 0.1.5-rc.3 for a long stretch; 0.2.0 resumed publishing but the desktop
- * bundle may still assemble a different rev), so the bundle declares the
- * core package as a peerDependency (for the market's host-aware discovery)
- * but loads the copy shipped inside the dsh install itself.
+ * Resolve the dsh-shipped core executor package from the running dsh
+ * installation. The npm registry copies of these packages often lag (or
+ * diverge from) the copies shipped inside the running host, so the bundle
+ * declares them as peerDependencies (for the market's host-aware discovery)
+ * but loads the copies shipped inside the dsh install itself. Both
+ * @deepseek-ai/dsh-pwsh-sandbox (Windows) and @deepseek-ai/dsh-bash-sandbox
+ * (other platforms) are shared packages of the same kernel install, so one
+ * resolution chain serves both platforms.
  *
  * Resolution order:
  *  1. `DSH_INSTALL_PACKAGE_JSON` env var — explicit override, path to the
@@ -70,7 +92,7 @@ export function dshPackageJsonCandidates(nodeDir) {
 function resolveDshPackageJson() {
   if (process.env.DSH_INSTALL_PACKAGE_JSON) return process.env.DSH_INSTALL_PACKAGE_JSON;
   try {
-    return createRequire(import.meta.url).resolve(`${CORE_PACKAGE}/package.json`);
+    return createRequire(import.meta.url).resolve(`${CORE.package}/package.json`);
   } catch { /* not on the normal resolution chain */ }
   try {
     return createRequire(import.meta.url).resolve('@deepseek-ai/dsh/package.json');
@@ -82,13 +104,21 @@ function resolveDshPackageJson() {
     } catch { /* unreadable path */ }
   }
   throw new Error(
-    `Cannot resolve the dsh core package "${CORE_PACKAGE}". ` +
-    `Set DSH_INSTALL_PACKAGE_JSON to the package.json of your dsh installation ` +
-    `(e.g. <node dir>/node_modules/@deepseek-ai/dsh/package.json).`,
+    `Cannot resolve the dsh core package "${CORE.package}". `,
+    + `Set DSH_INSTALL_PACKAGE_JSON to the package.json of your dsh installation `,
+    + `(e.g. <node dir>/node_modules/@deepseek-ai/dsh/package.json).`,
   );
 }
 
-const { SandboxPwshExecutor } = createRequire(resolveDshPackageJson())(CORE_PACKAGE);
+const CORE = resolveCorePackage();
+const ExecutorBase = createRequire(resolveDshPackageJson())(CORE.package)[CORE.export];
+if (typeof ExecutorBase !== 'function') {
+  throw new Error(
+    `The dsh core package "${CORE.package}" (resolved via DSH_INSTALL_PACKAGE_JSON or the `,
+    + `running dsh install) does not export "${CORE.export}". `,
+    + `The plugin subclass cannot be built on this platform (${process.env.RTK_TEST_PLATFORM || process.platform}).`,
+  );
+}
 
 const REWRITE_TIMEOUT_MS = 5000;
 const RTK_BIN = process.env.RTK_BIN || 'rtk';
@@ -231,7 +261,13 @@ function rtkRewrite(command) {
   });
 }
 
-export default class RtkPwshExecutor extends SandboxPwshExecutor {
+/**
+ * The platform-mapped subclass. On win32 this extends SandboxPwshExecutor;
+ * on linux/darwin it extends SandboxBashExecutor. The execute() override is
+ * byte-identical for both — the rewrite is pure text handling, and both base
+ * classes consume the same spec shape ({...spec, command}).
+ */
+export default class RtkShellExecutor extends ExecutorBase {
   async execute(spec) {
     // This plugin's own global kill switch (rtk itself has no equivalent
     // environment variable — only the `RTK_DISABLED=` command-text prefix).

@@ -18,6 +18,8 @@
  *   RTK_TEST_SOFT=1  把「与上游契约不符但非阻断」的差异降级为 WARN 而非 FAIL（变异测试用）
  *   RTK_TEST_FAST=1  跳过真 rtk 组（F/G），只跑假 rtk 覆盖的逻辑组 —— 变异测试用来提速；
  *                    变异体全部落在 A–E 组的代码路径上，跳过 F/G 不影响捕获能力
+ *   RTK_TEST_PLATFORM  被测平台（仅 I 组经 loadExecutor 传入）：index.js 模块加载时
+ *                      读它选基类，用于在 Windows 测机上跑 linux/darwin 分支
  */
 import { execFile, execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'node:fs';
@@ -154,6 +156,46 @@ class SandboxPwshExecutor {
 }
 module.exports = { SandboxPwshExecutor, SandboxUnavailableError };
 `);
+
+  // 假 bash-sandbox 包：与 pwsh 假包同构（I 组在 RTK_TEST_PLATFORM=linux/darwin 下
+  // 走真实加载路径，验证多端基类解析与改写行为）。类名与上游
+  // @deepseek-ai/dsh-bash-sandbox 的命名导出一致（lib/index.js: export
+  // { SandboxBashExecutor, SandboxBashExecutor as default }）。
+  const bashPkgDir = path.join(FAKE_DSH, 'node_modules', '@deepseek-ai', 'dsh-bash-sandbox');
+  mkdirSync(bashPkgDir, { recursive: true });
+  writeFileSync(path.join(bashPkgDir, 'package.json'), JSON.stringify({
+    name: '@deepseek-ai/dsh-bash-sandbox', version: '0.2.2-rc.3', main: 'index.cjs',
+  }));
+  writeFileSync(path.join(bashPkgDir, 'index.cjs'), `'use strict';
+class SandboxUnavailableError extends Error {
+  constructor(detail) { super('SANDBOX_UNAVAILABLE: ' + detail); this.name = 'SandboxUnavailableError'; }
+}
+class SandboxBashExecutor {
+  constructor(opts) { this.opts = opts; }
+  resolve(spec) { return { ...spec, sandboxResolved: true }; }
+  async execute(spec) {
+    globalThis.__rtkSpecs = globalThis.__rtkSpecs || [];
+    globalThis.__rtkSpecs.push(spec);
+    const mode = globalThis.__FAIL_MODE;
+    const isRewritten = String(spec.command).startsWith('rtk ');
+    if (mode === 'abort-always' && isRewritten) {
+      const e = new Error('This operation was aborted');
+      e.name = 'AbortError';
+      throw e;
+    }
+    if (mode === 'abort-check' && spec.signal && spec.signal.aborted === true) {
+      const e = new Error('This operation was aborted');
+      e.name = 'AbortError';
+      throw e;
+    }
+    if (mode === 'sandbox' && isRewritten) {
+      throw new SandboxUnavailableError('runner chain broken');
+    }
+    return { executed: spec.command };
+  }
+}
+module.exports = { SandboxBashExecutor, SandboxUnavailableError };
+`);
 }
 
 function teardownSandbox() {
@@ -190,12 +232,16 @@ let TIMEOUT_RESULT = null;
 
 /**
  * 以指定 RTK_BIN 加载被测模块（每次加 cache-busting query，让模块级
- * `const RTK_BIN = process.env.RTK_BIN` 重新求值）。
+ * `const RTK_BIN = process.env.RTK_BIN` 与按平台的基类解析重新求值）。
  * @param {string} rtkBin
+ * @param {string} [platform] 传 'linux'/'darwin' 时以 RTK_TEST_PLATFORM 覆盖
+ *   模块的平台判定（I 组）；不传则清掉该变量，回到宿主平台。
  */
-async function loadExecutor(rtkBin) {
+async function loadExecutor(rtkBin, platform) {
   process.env.DSH_INSTALL_PACKAGE_JSON = path.join(FAKE_DSH, 'package.json');
   process.env.RTK_BIN = rtkBin;
+  if (platform) process.env.RTK_TEST_PLATFORM = platform;
+  else delete process.env.RTK_TEST_PLATFORM;
   const url = `${pathToFileURL(TARGET_PATH).href}?load=${++loadSeq}`;
   const mod = await import(url);
   return { mod, executor: new mod.default({}) };
@@ -943,8 +989,100 @@ async function main() {
         check(G_H, 'peer 范围默认语义会漏判预发布（说明 includePrerelease 必需）',
           !satisfies(peerRange, '0.2.1-rc.3'), peerRange);
       }
+      const patchText = readFileSync(path.join(ROOT, 'cordis.patch.yml'), 'utf8');
       check(G_H, 'cordis.patch.yml 禁用原 pwsh-sandbox 行',
-        readFileSync(path.join(ROOT, 'cordis.patch.yml'), 'utf8').includes('disabled: true'), '');
+        /- id: pwsh-sandbox\s*\n\s*disabled: true/.test(patchText), '');
+      check(G_H, 'cordis.patch.yml 禁用原 bash-sandbox 行（多端）',
+        /- id: bash-sandbox\s*\n\s*disabled: true/.test(patchText), '');
+      check(G_H, 'cordis.patch.yml 插入 rtk-pwsh-shell 与 rtk-bash-shell 双行',
+        patchText.includes('rtk-pwsh-shell') && patchText.includes('rtk-bash-shell'), '');
+      check(G_H, '双 insert 行平台互斥 guard',
+        patchText.includes("disabled: !!js process.platform !== 'win32'")
+        && patchText.includes("disabled: !!js process.platform === 'win32'"), '');
+
+      const bashPeer = pkg.peerDependencies?.['@deepseek-ai/dsh-bash-sandbox'];
+      check(G_H, 'peerDependencies 声明 dsh-bash-sandbox（多端）',
+        typeof bashPeer === 'string' && bashPeer.length > 0, String(bashPeer));
+      if (bashPeer) {
+        check(G_H, 'bash peer 覆盖 0.2.2-rc.3（includePrerelease）',
+          satisfies(bashPeer, '0.2.2-rc.3', { includePrerelease: true }), bashPeer);
+        check(G_H, 'bash peer 默认语义会漏判预发布（includePrerelease 必需）',
+          !satisfies(bashPeer, '0.2.2-rc.3'), bashPeer);
+      }
+
+      // ─────────── I. 多端 bash 执行器（RTK_TEST_PLATFORM） ───────────
+      // Windows 上跑 linux/darwin 分支：走真实模块加载路径（resolveCorePackage →
+      // 假 dsh 安装里的 @deepseek-ai/dsh-bash-sandbox），验证基类选择、改写链路、
+      // 递归防护、失败安全与 spec 字段透传在 bash 基类上完全一致。
+      const G_I = 'I. 多端 bash 执行器';
+      {
+        const { mod } = await loadExecutor(FAKE_RTK_BIN);
+        check(G_I, 'resolveCorePackage 已导出', typeof mod.resolveCorePackage === 'function');
+        eq(G_I, 'win32 → pwsh-sandbox/SandboxPwshExecutor',
+          JSON.stringify(mod.resolveCorePackage('win32')),
+          JSON.stringify({ package: '@deepseek-ai/dsh-pwsh-sandbox', export: 'SandboxPwshExecutor' }));
+        eq(G_I, 'linux → bash-sandbox/SandboxBashExecutor',
+          JSON.stringify(mod.resolveCorePackage('linux')),
+          JSON.stringify({ package: '@deepseek-ai/dsh-bash-sandbox', export: 'SandboxBashExecutor' }));
+        eq(G_I, 'darwin → 同 linux 走 bash 基类',
+          mod.resolveCorePackage('darwin').export, 'SandboxBashExecutor');
+
+        // linux 平台：走真实模块加载路径，default 的基类是假 SandboxBashExecutor
+        process.env.FAKE_SCENARIO = 'exit3';
+        const linux = await loadExecutor(FAKE_RTK_BIN, 'linux');
+        eq(G_I, 'linux 加载 → default 是类', typeof linux.mod.default, 'function');
+        eq(G_I, 'linux 加载 → 基类是 SandboxBashExecutor',
+          Object.getPrototypeOf(Object.getPrototypeOf(linux.executor)).constructor.name, 'SandboxBashExecutor');
+        eq(G_I, 'linux 改写链路 → git status 改写成功',
+          await executedCommand(linux.executor, { command: 'git status' }), 'rtk git status');
+
+        // linux 递归防护
+        resetRtkCalls();
+        eq(G_I, 'linux 递归防护 → rtk 前缀原样',
+          await executedCommand(linux.executor, { command: 'rtk git status' }), 'rtk git status');
+        eq(G_I, 'linux 递归防护 → 不调用 rtk', rtkCallCount(), 0);
+
+        // linux fail-open：exit 1 无等价 → 原样执行
+        eq(G_I, 'linux exit 1 → 原样执行',
+          await executedCommand(linux.executor, { command: 'systemctl status nginx' }, 'exit1'),
+          'systemctl status nginx');
+
+        // darwin 平台
+        const darwin = await loadExecutor(FAKE_RTK_BIN, 'darwin');
+        eq(G_I, 'darwin 加载 → 基类是 SandboxBashExecutor',
+          Object.getPrototypeOf(Object.getPrototypeOf(darwin.executor)).constructor.name, 'SandboxBashExecutor');
+        process.env.FAKE_SCENARIO = 'exit3';
+        eq(G_I, 'darwin 改写链路 → ls -la 改写成功',
+          await executedCommand(darwin.executor, { command: 'ls -la' }), 'rtk ls -la');
+
+        // bash 端 spec 字段保留（sandboxPolicy 是 bash-sandbox resolve() 的产物）
+        const spec = {
+          command: 'git status', workdir: '/srv/project', timeoutMs: 999,
+          env: { A: '1' }, signal: 'SIG', sandboxPolicy: { mode: 'workspace-write' },
+        };
+        const r = await runExecute(linux.executor, spec);
+        const got = r.specs.at(-1) || {};
+        eq(G_I, 'bash 端改写后 command', got.command, 'rtk git status');
+        for (const field of ['workdir', 'timeoutMs', 'env', 'signal', 'sandboxPolicy']) {
+          check(G_I, `bash 端字段 ${field} 原样透传`,
+            JSON.stringify(got[field]) === JSON.stringify(spec[field]),
+            `期望 ${JSON.stringify(spec[field])}，实际 ${JSON.stringify(got[field])}`);
+        }
+
+        // linux ENOENT：bash 服务器上最常见的场景（rtk 不在 PATH）
+        const linuxMissing = await loadExecutor(MISSING_RTK_BIN, 'linux');
+        process.env.FAKE_SCENARIO = 'exit3';
+        const rm1 = await runExecute(linuxMissing.executor, { command: 'git status' });
+        eq(G_I, 'linux ENOENT → 原样执行', rm1.specs.at(-1)?.command, 'git status');
+        check(G_I, 'linux ENOENT → 告警一次', rm1.warn.length === 1, `实际 ${JSON.stringify(rm1.warn)}`);
+
+        // 恢复默认平台：win32 走 pwsh 基类（模块加载时的平台判定回归）
+        const win = await loadExecutor(FAKE_RTK_BIN);
+        eq(G_I, '默认平台加载 → 基类是 SandboxPwshExecutor',
+          Object.getPrototypeOf(Object.getPrototypeOf(win.executor)).constructor.name, 'SandboxPwshExecutor');
+        eq(G_I, '默认平台改写链路 → 正常',
+          await executedCommand(win.executor, { command: 'git status' }), 'rtk git status');
+      }
     }
   } finally {
     process.chdir(cwdBefore);

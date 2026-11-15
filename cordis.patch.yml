@@ -1,15 +1,24 @@
-# Replace the profile's pwsh sandbox executor with the rtk-rewriting subclass.
-# A patch row with an id and no insert targets the existing row: supplied fields
-# replace that row's fields (disabled flips it off). One ctx.shell implementation
-# per context — the original row must be disabled, not left mounted beside ours.
+# Replace the platform's default sandbox executor with the rtk-rewriting subclass.
+# Both base lines live in the kernel base bundle (dsh-base/cordis.patch.yml) with
+# their own platform guards (pwsh-sandbox: win32 only; bash-sandbox: non-win32
+# only), so disabling one on the platform where it is already off is an idempotent
+# no-op. One ctx.shell implementation per context — the platform's own row must be
+# disabled, not left mounted beside ours.
 - id: pwsh-sandbox
   disabled: true
 
+- id: bash-sandbox
+  disabled: true
+
 - insert:
-    # Mirror the base row's platform guard: on non-Windows the pwsh executor is
-    # intentionally off, and this subclass must NOT become the only ctx.shell
-    # on bash hosts.
+    # Windows: the pwsh subclass (default export extends SandboxPwshExecutor).
     - id: rtk-pwsh-shell
       name: dsh-pwsh-rtk-rewrite
       config: {}
       disabled: !!js process.platform !== 'win32'
+    # Linux/macOS: the bash subclass (same default export, resolved against
+    # SandboxBashExecutor on those platforms).
+    - id: rtk-bash-shell
+      name: dsh-pwsh-rtk-rewrite
+      config: {}
+      disabled: !!js process.platform === 'win32'
