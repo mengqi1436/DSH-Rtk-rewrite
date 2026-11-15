@@ -1076,10 +1076,12 @@ async function main() {
         eq(G_I, 'linux ENOENT → 原样执行', rm1.specs.at(-1)?.command, 'git status');
         check(G_I, 'linux ENOENT → 告警一次', rm1.warn.length === 1, `实际 ${JSON.stringify(rm1.warn)}`);
 
-        // 恢复默认平台：win32 走 pwsh 基类（模块加载时的平台判定回归）
+        // 恢复默认平台：基类必须与宿主平台一致（win32→pwsh，其余→bash）——
+        // 断言按宿主平台动态判定，套件在 Windows 与 Linux runner 上都成立
         const win = await loadExecutor(FAKE_RTK_BIN);
-        eq(G_I, '默认平台加载 → 基类是 SandboxPwshExecutor',
-          Object.getPrototypeOf(Object.getPrototypeOf(win.executor)).constructor.name, 'SandboxPwshExecutor');
+        eq(G_I, '默认平台加载 → 基类与宿主平台一致',
+          Object.getPrototypeOf(Object.getPrototypeOf(win.executor)).constructor.name,
+          process.platform === 'win32' ? 'SandboxPwshExecutor' : 'SandboxBashExecutor');
         eq(G_I, '默认平台改写链路 → 正常',
           await executedCommand(win.executor, { command: 'git status' }), 'rtk git status');
       }
