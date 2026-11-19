@@ -216,8 +216,9 @@ function isRtkSegment(segment) {
  * rewritten once more, which is safe because rtk exits 1 on a first word it
  * does not recognise — so safety here leans on upstream's tolerance, and it
  * needs revisiting if rtk ever starts rewriting through `sudo`/`powershell`.
- * rtk's own guard is case-sensitive and literal-only (`registry.rs:836`,
- * `:2008`), so this is still deliberately broader than upstream.
+ * rtk's own guard is case-sensitive and literal-only (`registry.rs:832`,
+ * `:2004`, line numbers as of rtk 1.2.1), so this is still deliberately
+ * broader than upstream.
  */
 export function isRtkInvocation(command) {
   const segments = splitSegments(String(command));
@@ -229,12 +230,20 @@ export function isRtkInvocation(command) {
  * Resolves the rewritten command string, or null when the command must run
  * unrewritten (no equivalent / rtk unavailable / timeout / any failure).
  *
- * Exit-code contract (`src/hooks/rewrite_cmd.rs:111-124`, mirrored in
- * `rtk rewrite --help`): 0 = rewritten, allow rules cover every command;
+ * Exit-code contract (`src/hooks/rewrite_cmd.rs:110-125` in rtk 1.2.1,
+ * unchanged since 0.50.0; mirrored in `rtk rewrite --help`):
+ * 0 = rewritten, allow rules cover every command;
  * 3 = rewritten, host must confirm (the normal case — no rules configured);
- * 1 = nothing rewritten, run unchanged; 2 = a deny rule matched, nothing
- * printed. 0 and 3 both carry the line on stdout, and rtk does NOT suppress
- * identity rewrites, so the caller must compare against the original.
+ * 1 = nothing rewritten, run unchanged; 2 = a deny rule matched. 0 and 3 both
+ * carry the line on stdout, and rtk does NOT suppress identity rewrites, so the
+ * caller must compare against the original.
+ *
+ * Exit 2 is the one code whose stdout is never a command: rtk's own Rewrite help
+ * documents that a printed message there is an rtk pipeline-rule denial or routing
+ * note ("block it with that message"). A plain deny prints nothing --
+ * rewrite_cmd.rs:122 is the only process::exit(2) in the tree, and that branch has
+ * no print before it -- but a pipeline rule can, so this plugin discards exit-2
+ * stdout unconditionally and runs the original.
  * Node's execFile puts the child's exit code on err.code as a number with
  * err.exitCode undefined; spawn failures like ENOENT put a string there —
  * hence the Number(err.code) checks.

@@ -148,8 +148,29 @@ correct with **no code change**; the peer range `>=0.2.0-rc.1 <0.3.0-0` covers
 semantics DSH uses). Two caveats stated plainly: the local checkout of the upstream
 repo is a `--depth 1` shallow clone with no per-package CHANGELOGs, so this comparison
 was made file-by-file against the sources at `master` rather than against a commit
-range; and `devDependencies` still pins `0.2.1-rc.3`, which only affects local
-type/debug reference and not runtime resolution.
+range.
+
+**0.2.2-rc.5** (verified 2026-11-20, byte-level npm package comparison): the desktop
+kernel has moved to `dsh 0.2.2-rc.5` and both sandbox packages this plugin builds on
+show **zero code difference**: `@deepseek-ai/dsh-pwsh-sandbox@0.2.2-rc.5`'s
+`lib/index.js` is **byte-identical** to `0.2.1-rc.3` (same SHA256 `bed19d2c…`, 252
+lines, 0 diff), and `@deepseek-ai/dsh-bash-sandbox@0.2.2-rc.5` is likewise
+**byte-identical** to `0.2.2-rc.3` (same SHA256 `0f788f99…`). The
+`SandboxPwshExecutor` / `SandboxBashExecutor` named exports, the `execute(spec)`
+override point and the `resolve()` policy stamp are all retained. The plugin needs
+**no code change**; the peer range `>=0.2.0-rc.1 <0.3.0-0` covers 0.2.2-rc.5.
+
+`devDependencies` is aligned to `0.2.2-rc.5` as well, with `@deepseek-ai/cordis@4.1.0`
+added explicitly. That addition is required: rc.5 tightens its peer to
+`@deepseek-ai/cordis ~4.1.0` (this repo had 4.0.5) and npm does not auto-install the
+peers of a devDependency, so bumping the sandbox alone fails with ERESOLVE. With it,
+`npm install` resolves cleanly and the lockfile lifts `dsh-pwsh-sandbox` plus its
+internal deps (`dsh-shell`, `dsh-pwsh-local`, `dsh-sandbox`, `dsh-sandbox-policy`,
+`cordis`, `cosmokit`, …) onto the same version line as the 0.2.2-rc.5 desktop kernel —
+local dev reference and runtime kernel now match exactly. Those entries still serve
+local type/debug reference only and never runtime resolution of the published package
+(the suite injects a stub host package via `DSH_INSTALL_PACKAGE_JSON`, so CI runs with
+no `node_modules`).
 
 **Desktop adaptation** (verified and fixed on a real machine 2026-09-30, v1.1.3):
 the desktop 0.2.0-rc.2 dsh kernel is packaged inside `resources\app.asar`; neither
@@ -169,13 +190,13 @@ in group H). After installing v1.1.3,
 ## Requirements
 
 - **DeepSeek Harness ≥ 0.1.7 (including 0.2.0-rc.1 / 0.2.0-rc.2 / 0.2.1-rc.1 /
-  0.2.1-rc.2 / 0.2.1-rc.3 / 0.2.2-rc.1)** desktop app
+  0.2.1-rc.2 / 0.2.1-rc.3 / 0.2.2-rc.1 / 0.2.2-rc.5)** desktop app
   (`dsh` CLI with the `dsh plugin` mechanism)
 - **rtk with the `rtk rewrite` subcommand** on PATH (upstream reference hook states
   `Requires: rtk >= 0.23.0`; use the `RTK_BIN` environment variable to point at an
   alias or a non-PATH install). Contract verified against rtk 0.50.0, re-verified
-  against 0.51.0 on 2026-10-03, and re-verified again against rtk 1.1.0 on 2026-11-08:
-  exit-code semantics unchanged throughout.
+  against 0.51.0 on 2026-10-03, re-verified against 1.1.0 on 2026-11-08, and
+  re-verified against 1.2.1 on 2026-11-20: exit-code semantics unchanged throughout.
 - Windows + PowerShell **or** Linux/macOS + bash: on win32 the plugin replaces the
   pwsh executor (`SandboxPwshExecutor`); on linux/darwin it replaces the bash
   executor (`SandboxBashExecutor`) — the same two base-bundle lines the kernel
@@ -192,6 +213,7 @@ internals. That contract has been stable across every version probed:
 | 0.50.0 | 2026-09-25 | exit 3 + stdout for a supported command, exit 1 + no output otherwise |
 | 0.51.0 | 2026-10-03 | unchanged |
 | 1.1.0 (this machine) | 2026-11-08 | unchanged; also the version the full command-family table above was measured on |
+| 1.2.1 (this machine, current) | 2026-11-20 | unchanged; exit 3/1 semantics, identity pass-through, compound/pipeline rewriting and the `RTK_DISABLED=` prefix all reproduce. The v1.2.0→v1.2.1 changes are confined to cargo prefix routing, the proxy and hook integrity — the `rewrite` contract is untouched |
 
 The plugin itself is platform-agnostic: it consumes only the `rtk rewrite` **process
 contract** (exit code + stdout), which is identical across the Windows, Linux and
@@ -200,14 +222,20 @@ shells, source builds for pre-AVX2 CPUs) are rtk-side and covered in
 [Install / Uninstall](#install--uninstall).
 
 **Upstream `develop` runs ahead of the release line and that is not a compatibility
-problem.** At the time of writing, upstream `develop` sits at tag `dev-1.2.0-rc.620`
-while its own `Cargo.toml` still reads `0.49.0` and `CHANGELOG.md` stops at `0.49.0` —
-three different numbering tracks (`dev-*` build tags, release-please version, and the
-published installer version such as the local `1.1.0`). They are **not** comparable
-semver, so "local 1.1.0 is behind 1.2.0-rc" is the wrong reading. What matters is
-capability measured per command, and the local 1.1.0 already implements the full
-contract (exit 3 semantics, identity pass-through, compound/pipeline rewriting,
-`RTK_DISABLED=` prefix handling).
+problem.** At the 2026-11-20 check, upstream `develop` had advanced 147 commits past
+`dev-1.2.0-rc.620` (`git describe` → `dev-1.2.0-rc.620-147-g24ff2267`), with the newest
+build tag at `dev-1.3.0-rc.648`, while its own `Cargo.toml` still reads `0.49.0` and
+`CHANGELOG.md` stops at `0.49.0` — three different numbering tracks (`dev-*` build tags,
+release-please version, and the published installer version such as the local `1.2.1`).
+They are **not** comparable semver, so "local 1.2.1 is behind 1.3.0-rc" is the wrong
+reading. What matters is capability measured per command, and the local 1.2.1 already
+implements the full contract (exit 3 semantics, identity pass-through, compound/pipeline
+rewriting, `RTK_DISABLED=` prefix handling). Of those 147 commits,
+`src/hooks/rewrite_cmd.rs`, `decision.rs` and `permissions.rs` have **zero changes** and
+the `Rewrite` subcommand definition plus exit-code mapping in `src/lib.rs` are
+line-for-line identical; the real work is in `src/discover/registry.rs` (cargo prefix
+routing, exclusion matching by path) and docs — coverage, not the process contract this
+plugin consumes.
 
 **Command coverage grows with rtk, not with this plugin.** Every rewrite rule lives
 inside the rtk binary (native rules in `src/discover/rules.rs` plus 62 TOML filters in
@@ -417,7 +445,7 @@ correctness — the original command always runs when there is no equivalent:
 - **No rewrite of commands with a file redirect** (`git status > out.txt`) or a
   command substitution (`echo $(git status)`); rtk refuses constructs it cannot attest.
 - **Some sub-invocations are narrower than the tool's own surface.** Examples measured
-  on rtk 1.1.0: `npm test` and `pnpm test` are not rewritten (the rules cover
+  on rtk 1.2.1 (identical to 1.1.0): `npm test` and `pnpm test` are not rewritten (the rules cover
   `npm run/exec/x` and `pnpm run/exec/i/install/list/ls/outdated`, not the bare `test`
   script alias); `dotnet build` is rewritten but `dotnet test` is not; `vitest run`
   comes back as `rtk vitest` (the `run` word is absorbed by rtk). All of these are rtk
@@ -426,8 +454,9 @@ correctness — the original command always runs when there is no equivalent:
   comes back unchanged under exit 0/3; suppression is the caller's job, which is why
   the plugin compares the result against the input.
 - **A `wc` stage in a pipeline is not rewritten** even though upstream
-  `hooks/README.md` lists it as pipeline-safe; measured `ls | wc -l` → exit 1 on rtk
-  1.1.0. Upstream documentation, not the plugin, is what trails reality here.
+  `hooks/README.md` lists it as pipeline-safe; measured `ls | wc -l` and
+  `git log | wc -l` → exit 1 on rtk 1.2.1. Upstream documentation, not the plugin, is
+  what trails reality here.
 
 ## Verification
 

@@ -125,8 +125,25 @@ tree 比对，`packages/shell/**`、`packages/sandbox/**`、`packages/subprocess
 仍在，id-target 照旧命中。插件**无需代码改动**；peer 范围 `>=0.2.0-rc.1 <0.3.0-0`
 在 DSH 使用的 `satisfies(..., { includePrerelease: true })` 语义下同样覆盖 0.2.2-rc.1。
 两点如实说明：本地上游仓库是 `--depth 1` 浅克隆且没有 per-package CHANGELOG，因此本条是
-按 `master` 的源文件逐个比对，而非按 commit 区间比对；`devDependencies` 仍钉 `0.2.1-rc.3`，
-该项只影响本地类型/调试参照，不参与运行时解析。
+按 `master` 的源文件逐个比对，而非按 commit 区间比对。
+
+**0.2.2-rc.5 兼容性**（2026-11-20 验证，npm 包逐字节比对）：桌面端内核已升到
+`dsh 0.2.2-rc.5`，本插件依赖的两个沙箱包均**零代码差异**：
+`@deepseek-ai/dsh-pwsh-sandbox@0.2.2-rc.5` 的 `lib/index.js` 与 `0.2.1-rc.3`
+**逐字节相同**（SHA256 同为 `bed19d2c…`，252 行 0 差异）；
+`@deepseek-ai/dsh-bash-sandbox@0.2.2-rc.5` 与 `0.2.2-rc.3` 同样**逐字节相同**
+（SHA256 同为 `0f788f99…`）。`SandboxPwshExecutor` / `SandboxBashExecutor` 的具名导出、
+`execute(spec)` 覆写点、`resolve()` 策略印章层全部保留。插件**无需代码改动**；
+peer 范围 `>=0.2.0-rc.1 <0.3.0-0` 覆盖 0.2.2-rc.5。
+
+`devDependencies` 同步对齐到 `0.2.2-rc.5`，并显式补上 `@deepseek-ai/cordis@4.1.0`。
+后者是必需的：rc.5 把 peer 收紧到 `@deepseek-ai/cordis ~4.1.0`（本地原为 4.0.5），
+而 npm 不会自动补 devDependency 的 peer，只改 sandbox 版本会直接 ERESOLVE。补上之后
+`npm install` 干净通过，lock 里 `dsh-pwsh-sandbox` 及其内部依赖（`dsh-shell`、
+`dsh-pwsh-local`、`dsh-sandbox`、`dsh-sandbox-policy`、`cordis`、`cosmokit` 等）
+一并升到与桌面内核 0.2.2-rc.5 相同的版本线——即本地开发参照与运行时内核完全同版。
+该项仍只服务本地类型/调试参照，不参与发布包运行时解析（套件用
+`DSH_INSTALL_PACKAGE_JSON` 注入假宿主包，故 CI 无 `node_modules` 也能跑）。
 
 **桌面端适配**（2026-09-30 实机验证并修复，v1.1.3）：桌面端 0.2.0-rc.2 的 dsh 内核
 打包在 `resources\app.asar` 内，桌面 profile 依赖链与 node 目录布局均解析不到内核包，
@@ -140,11 +157,12 @@ tree 比对，`packages/shell/**`、`packages/sandbox/**`、`packages/subprocess
 ## 环境要求
 
 - **DeepSeek Harness ≥ 0.1.7（含 0.2.0-rc.1 / 0.2.0-rc.2 / 0.2.1-rc.1 /
-  0.2.1-rc.2 / 0.2.1-rc.3 / 0.2.2-rc.1）桌面端**
+  0.2.1-rc.2 / 0.2.1-rc.3 / 0.2.2-rc.1 / 0.2.2-rc.5）桌面端**
   （`dsh` CLI，插件机制 `dsh plugin`）
 - **`rtk rewrite` 子命令可用**且在 PATH 上（上游参考 hook 标注 `Requires: rtk >= 0.23.0`；
   可用 `RTK_BIN` 环境变量指定别名或非 PATH 安装）。契约已对照 rtk 0.50.0 实测、
-  2026-10-03 对照 0.51.0 复核、2026-11-08 再对照 1.1.0 复核：退出码语义全程未变。
+  2026-10-03 对照 0.51.0 复核、2026-11-08 对照 1.1.0 复核、2026-11-20 对照 1.2.1 复核：
+  退出码语义全程未变。
 - Windows + PowerShell **或** Linux/macOS + bash：win32 上插件替换 pwsh 执行器
   （`SandboxPwshExecutor`）；linux/darwin 上替换 bash 执行器（`SandboxBashExecutor`）
   ——与内核 base bundle 注册的两行执行器及其平台互斥 guard 完全对应。其他 shell
@@ -160,17 +178,23 @@ tree 比对，`packages/shell/**`、`packages/sandbox/**`、`packages/subprocess
 | 0.50.0 | 2026-09-25 | 支持的命令 exit 3 + stdout，其余 exit 1 无输出 |
 | 0.51.0 | 2026-10-03 | 不变 |
 | 1.1.0（本机） | 2026-11-08 | 不变；上文命令族表的全部实测即基于此版本 |
+| 1.2.1（本机，当前） | 2026-11-20 | 不变；exit 3/1 语义、恒等透传、复合与管道改写、`RTK_DISABLED=` 前缀全部复现；v1.2.0→v1.2.1 的改动集中在 cargo 前缀路由、proxy 与 hook 完整性，未触及 `rewrite` 契约 |
 
 插件本身与平台无关：它只消费 `rtk rewrite` 的**进程契约**（退出码 + stdout），同一
 rtk 版本的 Windows/Linux/macOS 构建契约一致。Linux 特有的问题（非登录 SSH shell 的
 PATH、老 CPU 需源码编译）属于 rtk 侧，见[安装 / 卸载](#安装--卸载)。
 
-**上游 `develop` 跑到发布线前面，这不构成兼容性问题。** 当前上游 `develop` 停在 tag
-`dev-1.2.0-rc.620`，而它自己的 `Cargo.toml` 仍写 `0.49.0`、`CHANGELOG.md` 也止于
-`0.49.0`——这是三套不同的编号轨（`dev-*` 构建 tag、release-please 发布版本、以及本机
-`1.1.0` 这类安装包版本）。它们**不是可比的 semver**，所以「本机 1.1.0 落后于 1.2.0-rc」
-是错误读法。真正要看的是逐命令实测的能力：本机 1.1.0 已实现完整契约（exit 3 语义、
-恒等透传、复合/管道改写、`RTK_DISABLED=` 前缀处理）。
+**上游 `develop` 跑到发布线前面，这不构成兼容性问题。** 2026-11-20 复核时上游
+`develop` 在 `dev-1.2.0-rc.620` 之后又走了 147 个提交（`git describe` →
+`dev-1.2.0-rc.620-147-g24ff2267`），最新构建 tag 已是 `dev-1.3.0-rc.648`；而它自己的
+`Cargo.toml` 仍写 `0.49.0`、`CHANGELOG.md` 也止于 `0.49.0`——这是三套不同的编号轨
+（`dev-*` 构建 tag、release-please 发布版本、以及本机 `1.2.1` 这类安装包版本）。
+它们**不是可比的 semver**，所以「本机 1.2.1 落后于 1.3.0-rc」是错误读法。真正要看的是
+逐命令实测的能力：本机 1.2.1 已实现完整契约（exit 3 语义、恒等透传、复合/管道改写、
+`RTK_DISABLED=` 前缀处理）。这 147 个提交里 `src/hooks/rewrite_cmd.rs`、
+`decision.rs`、`permissions.rs` **零改动**，`src/lib.rs` 的 `Rewrite` 子命令定义与
+退出码映射逐行不变，实际变更集中在 `src/discover/registry.rs`（cargo 前缀路由、
+排除项按路径匹配）与文档——即改写覆盖面，而非插件消费的进程契约。
 
 **命令覆盖随 rtk 增长，不随本插件增长。** 所有改写规则都在 rtk 二进制里（原生规则在
 `src/discover/rules.rs`，另有 `src/filters/` 下 62 个 TOML 过滤器）。因此升级 rtk 就会
@@ -347,7 +371,7 @@ shell、可能不加载 `~/.profile`，此时在 harness 启动环境里显式�
 - **`sudo …` 不改写**——rtk 刻意透传 sudo 命令。
 - **带文件重定向的命令不改写**（`git status > out.txt`），**命令替换也不改写**
   （`echo $(git status)`）；rtk 拒绝它无法确认的构造。
-- **部分子调用的覆盖比工具本身的能力窄。** rtk 1.1.0 实测例子：`npm test` 与
+- **部分子调用的覆盖比工具本身的能力窄。** rtk 1.2.1 实测例子（与 1.1.0 完全一致）：`npm test` 与
   `pnpm test` 不改写（规则覆盖的是 `npm run/exec/x` 与
   `pnpm run/exec/i/install/list/ls/outdated`，不含裸 `test` 脚本别名）；
   `dotnet build` 会改但 `dotnet test` 不会；`vitest run` 返回 `rtk vitest`
@@ -355,7 +379,8 @@ shell、可能不加载 `~/.profile`，此时在 harness 启动环境里显式�
 - **`rtk rewrite` 不做恒等抑制。** 已是 rtk 形态的命令在 exit 0/3 下原样返回，抑制是
   调用方的责任——所以插件要把结果与输入比较。
 - **管道里的 `wc` 段不改写**，尽管上游 `hooks/README.md` 把它列为 pipeline-safe；
-  rtk 1.1.0 实测 `ls | wc -l` → exit 1。落后于实际的是上游文档，不是本插件。
+  rtk 1.2.1 实测 `ls | wc -l` 与 `git log | wc -l` → exit 1。落后于实际的是上游文档，
+  不是本插件。
 
 ## 验证
 

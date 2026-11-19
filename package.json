@@ -51,6 +51,7 @@
     }
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-pwsh-sandbox": "0.2.1-rc.3"
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-pwsh-sandbox": "0.2.2-rc.5"
   }
 }

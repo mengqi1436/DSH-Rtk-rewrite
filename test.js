@@ -122,7 +122,7 @@ else { process.exit(0); }
   writeFileSync(path.join(FAKE_DSH, 'package.json'), JSON.stringify({ name: 'fake-dsh-install', version: '0.0.0' }));
   const pkgDir = path.join(FAKE_DSH, 'node_modules', '@deepseek-ai', 'dsh-pwsh-sandbox');
   writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({
-    name: '@deepseek-ai/dsh-pwsh-sandbox', version: '0.2.1-rc.3', main: 'index.cjs',
+    name: '@deepseek-ai/dsh-pwsh-sandbox', version: '0.2.2-rc.5', main: 'index.cjs',
   }));
   writeFileSync(path.join(pkgDir, 'index.cjs'), `'use strict';
 class SandboxUnavailableError extends Error {
@@ -164,7 +164,7 @@ module.exports = { SandboxPwshExecutor, SandboxUnavailableError };
   const bashPkgDir = path.join(FAKE_DSH, 'node_modules', '@deepseek-ai', 'dsh-bash-sandbox');
   mkdirSync(bashPkgDir, { recursive: true });
   writeFileSync(path.join(bashPkgDir, 'package.json'), JSON.stringify({
-    name: '@deepseek-ai/dsh-bash-sandbox', version: '0.2.2-rc.3', main: 'index.cjs',
+    name: '@deepseek-ai/dsh-bash-sandbox', version: '0.2.2-rc.5', main: 'index.cjs',
   }));
   writeFileSync(path.join(bashPkgDir, 'index.cjs'), `'use strict';
 class SandboxUnavailableError extends Error {
@@ -361,7 +361,7 @@ async function main() {
         check(G_A, 'exit 1 是正常分支 → 不产生告警', r.warn.length === 0, `实际告警: ${JSON.stringify(r.warn)}`);
       }
 
-      // stdout === 原命令：rtk 对已是 rtk 形态的命令原样回吐（decision.rs:412-417，不做恒等抑制）。
+      // stdout === 原命令：rtk 对已是 rtk 形态的命令原样回吐（decision.rs:418-423，不做恒等抑制）。
       // 用非 rtk 开头的命令触发，确保真的走到 rtk（而不是被递归防护拦掉），
       // 才能真正覆盖 index.js 里 `rewritten !== spec.command` 这条分支。
       {
@@ -374,7 +374,8 @@ async function main() {
         check(G_A, '恒等输出 → 不打印改写日志（因为没有实际改写）', r.log.length === 0, `实际日志: ${JSON.stringify(r.log)}`);
       }
 
-      // 上游 rewrite_cmd.rs:122 用 `process::exit(2)` 直接退出，全仓仅此一处 →
+      // 上游 rewrite_cmd.rs:122 用 `process::exit(2)` 直接退出，全仓仅此一处 —— rtk 1.2.1
+      // 复核仍成立：`grep -rn 'process::exit(2)' src/` 只命中该行（另一处是文档注释）→
       // exit 2 恒无输出。「exit 2 带消息」是不存在的组合，不构造该用例。
       // 语义上是 deny：插件的定位是「透传桥、绝不阻断」，所以正确行为是原样执行。
       eq(G_A, 'exit 2（deny，恒无输出）→ 原样执行',
@@ -484,7 +485,7 @@ async function main() {
       const { executor } = await loadExecutor(FAKE_RTK_BIN);
       process.env.FAKE_SCENARIO = 'exit3';
 
-      // 上游 registry.rs:836 的判定：`!has_compound && (starts_with("rtk ") || == "rtk")`
+      // 上游 registry.rs:832 的判定：`!has_compound && (starts_with("rtk ") || == "rtk")`
       // —— 只对**非复合**命令做恒等短路。插件侧的最优行为同样是不必再 spawn 一次 rtk。
       const guardCases = [
         ['裸 rtk', 'rtk'],
@@ -813,7 +814,7 @@ async function main() {
         check(G_E, `找到纯函数导出: ${found.join(', ')}`, true);
         for (const name of found) {
           const fn = mod[name];
-          // 应判为「已是 rtk 调用」——与上游 registry.rs:836/2008 的意图一致，且覆盖更多写法
+          // 应判为「已是 rtk 调用」——与上游 registry.rs:832/2004 的意图一致，且覆盖更多写法
           const yes = [
             'rtk', 'rtk git status', 'rtk.exe git status',
             'RTK git status', 'RTK.EXE git status', 'Rtk Git Status',
@@ -988,9 +989,20 @@ async function main() {
       if (peerRange) {
         check(G_H, 'peer 范围覆盖 0.2.1-rc.3（includePrerelease）', satisfies(peerRange, '0.2.1-rc.3', { includePrerelease: true }), peerRange);
         check(G_H, 'peer 范围覆盖 0.2.2-rc.1（includePrerelease）', satisfies(peerRange, '0.2.2-rc.1', { includePrerelease: true }), peerRange);
+        check(G_H, 'peer 范围覆盖 0.2.2-rc.5（includePrerelease）', satisfies(peerRange, '0.2.2-rc.5', { includePrerelease: true }), peerRange);
         check(G_H, 'peer 范围默认语义会漏判预发布（说明 includePrerelease 必需）',
           !satisfies(peerRange, '0.2.1-rc.3'), peerRange);
       }
+      // devDependencies 必须与桌面内核 0.2.2-rc.5 同版：sandbox 包自身不成立时
+      // （rc.5 把 peer 收紧到 @deepseek-ai/cordis ~4.1.0）本地 npm install 会 ERESOLVE，
+      // 所以 cordis 也要显式声明。这两条锁住「本地参照与运行时内核同版线」。
+      const devSandbox = pkg.devDependencies?.['@deepseek-ai/dsh-pwsh-sandbox'];
+      check(G_H, 'devDependencies 的 pwsh-sandbox 对齐 0.2.2-rc.5',
+        devSandbox === '0.2.2-rc.5', String(devSandbox));
+      const devCordis = pkg.devDependencies?.['@deepseek-ai/cordis'];
+      check(G_H, 'devDependencies 显式声明 cordis 4.1.0（rc.5 的 peer 要求）',
+        devCordis === '4.1.0', String(devCordis));
+
       const patchText = readFileSync(path.join(ROOT, 'cordis.patch.yml'), 'utf8');
       check(G_H, 'cordis.patch.yml 禁用原 pwsh-sandbox 行',
         /- id: pwsh-sandbox\s*\n\s*disabled: true/.test(patchText), '');
@@ -1008,6 +1020,8 @@ async function main() {
       if (bashPeer) {
         check(G_H, 'bash peer 覆盖 0.2.2-rc.3（includePrerelease）',
           satisfies(bashPeer, '0.2.2-rc.3', { includePrerelease: true }), bashPeer);
+        check(G_H, 'bash peer 覆盖 0.2.2-rc.5（includePrerelease）',
+          satisfies(bashPeer, '0.2.2-rc.5', { includePrerelease: true }), bashPeer);
         check(G_H, 'bash peer 默认语义会漏判预发布（includePrerelease 必需）',
           !satisfies(bashPeer, '0.2.2-rc.3'), bashPeer);
       }
