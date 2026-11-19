@@ -16,8 +16,9 @@
  * 环境变量：
  *   RTK_TEST_TARGET  被测模块（相对本文件），默认 ./index.js —— 变异测试靠它指向变异副本
  *   RTK_TEST_SOFT=1  把「与上游契约不符但非阻断」的差异降级为 WARN 而非 FAIL（变异测试用）
- *   RTK_TEST_FAST=1  跳过真 rtk 组（F/G），只跑假 rtk 覆盖的逻辑组 —— 变异测试用来提速；
- *                    变异体全部落在 A–E 组的代码路径上，跳过 F/G 不影响捕获能力
+ *   RTK_TEST_FAST=1  跳过需要真 rtk 的组（C2/F/G 与 E1b），只跑假 rtk 覆盖的逻辑组。
+ *                    CI runner 上没有 rtk，所以 CI 必须用这个模式；新增的真 rtk 用例一律
+ *                    归入 C2/F/G/E1b 之一并先判 FAST，否则会让 CI 变红。
  *   RTK_TEST_PLATFORM  被测平台（仅 I 组经 loadExecutor 传入）：index.js 模块加载时
  *                      读它选基类，用于在 Windows 测机上跑 linux/darwin 分支
  */
@@ -74,7 +75,11 @@ function setupSandbox() {
   // 这样即使 CI runner 上没有 rtk，也能在 P1-1 的正反两面锁住回归。
   //
   // 保真度边界（别拿假 rtk 反推真 rtk 语义）：
-  //  - 有 `--` 隔离时，11 条命令上假/真 rtk 输出完全一致（实测差异 0）。
+  //  - 有 `--` 隔离时，11 条命令里只有 6 条与真 rtk 完全一致，5 条不一致：
+  //    复合命令（假 rtk 不逐段改写）、`FOO=1 git status`（假 rtk 把前缀吞进 argv 而非保留）、
+  //    `cat -n f.txt`（假 rtk 不模拟 `read` 重映射）、`git status; git log`（同复合）。
+  //    原因：假 rtk 只在整串前机械加 `rtk `，不模拟分段改写、别名重映射与 ENV 前缀保留。
+  //    A/C 组只依赖「单段、无别名」语义，故不受影响；但**别拿假 rtk 反推真 rtk 语义**。
   //  - 无 `--` 时假 rtk 比真 rtk 0.49.0 **更严格**：真 rtk 只对 -h/--help/-hh 吐 help，
   //    假 rtk 对任何 leading-dash 命令都吐。方向是安全的 —— 过严只会让测试更强，
   //    不会造成假绿；但也意味着「假 rtk 通过」不等于「真 rtk 的全部 flag 语义已覆盖」。
@@ -97,12 +102,22 @@ if (cmd.startsWith('-')) {
 if (scenario === 'timeout') { setTimeout(() => {}, 120000); }
 else if (scenario === 'crash') { throw new Error('fake rtk exploded'); }
 else if (scenario === 'crash70') { process.stderr.write('fake rtk exploded' + String.fromCharCode(10)); process.exit(70); }
-else if (scenario === 'exit3') { process.stdout.write('rtk ' + cmd); process.exit(3); }
+else if (scenario === 'exit3') {
+  // 复刻真 rtk 1.2.1 的两条实测性质（规范 2 节）：
+  //   1) 比较与回吐都基于 trim 后的行：'  rtk git status' -> exit 3 + 'rtk git status'
+  //   2) 恒等守卫 trimmed.startsWith('rtk ') || trimmed === 'rtk' 原样回吐，不加前缀
+  // 少了这两条，C 组「前置空白」用例会测到一个真 rtk 给不出的 'rtk    rtk git status'。
+  const t = cmd.trim();
+  const isRtkForm = t === 'rtk' || t.startsWith('rtk ');
+  process.stdout.write(isRtkForm ? t : 'rtk ' + cmd);
+  process.exit(3);
+}
 else if (scenario === 'identity') { process.stdout.write(cmd); process.exit(3); }
 else if (scenario === 'exit1') { process.exit(1); }
 else if (scenario === 'exit0run') { process.stdout.write('rtk ' + cmd); process.exit(0); }
 else if (scenario === 'exit0empty') { process.exit(0); }
 else if (scenario === 'deny2empty') { process.exit(2); }
+else if (scenario === 'deny2msg') { process.stdout.write('rtk: pipeline rule blocked this pipeline' + String.fromCharCode(10)); process.exit(2); }
 else if (scenario === 'whitespace') { process.stdout.write('\\n\\n  rtk ' + cmd + '  \\n\\n'); process.exit(3); }
 else if (scenario === 'weird7') { process.stdout.write('rtk weird'); process.exit(7); }
 else if (scenario === 'weird7empty') { process.exit(7); }
@@ -295,10 +310,15 @@ function detectRealRtk() {
   }
 }
 
-/** 直接问真 rtk 要「这条命令的正确处理方式」，作为 oracle。 */
-function realRewrite(bin, command) {
+/**
+ * 直接问真 rtk 要「这条命令的正确处理方式」，作为 oracle。
+ * `envOverride` 用于 RTK_REWRITE_HOST 参数化用例（规范 §⑦.2：只有 openclaw 把 exit 3 抬成 0）。
+ */
+function realRewrite(bin, command, envOverride) {
   return new Promise((resolve) => {
-    execFile(bin, ['rewrite', command], { timeout: 20000, windowsHide: true }, (err, stdout) => {
+    const opts = { timeout: 20000, windowsHide: true };
+    if (envOverride) opts.env = { ...process.env, ...envOverride };
+    execFile(bin, ['rewrite', command], opts, (err, stdout) => {
       resolve({
         code: err ? (typeof err.code === 'number' ? err.code : String(err.code)) : 0,
         out: String(stdout || '').trim(),
@@ -367,24 +387,46 @@ async function main() {
       {
         resetRtkCalls();
         process.env.FAKE_SCENARIO = 'identity';
-        const r = await runExecute(executor, { command: 'git status' });
+        const identitySpec = { command: 'git status' };
+        const r = await runExecute(executor, identitySpec);
         eq(G_A, '恒等输出 → 最终执行原命令', r.specs.at(-1)?.command, 'git status');
         eq(G_A, '恒等输出 → 只调用一次 super.execute（无循环）', r.specs.length, 1);
         eq(G_A, '恒等输出 → 只 spawn 一次 rtk（无循环）', rtkCallCount(), 1);
+        // 恒等抑制的**唯一**裁判必须是「交回的 spec 就是传入的 spec 引用」：
+        // 若只靠下面那条「不打印改写日志」，把抑制与 log() 调用一起删掉的变异体会存活
+        // （审查 P1-5 实测：537/537 全绿）。引用相等这条由 index.js 走 return super.execute(spec)
+        // 保证，改写分支必然构造新对象。
+        check(G_A, '恒等输出 → 交回的必须是原 spec 引用（抑制的唯一裁判）',
+          r.specs.at(-1) === identitySpec,
+          '构造了新对象，说明走了改写分支而不是恒等抑制');
         check(G_A, '恒等输出 → 不打印改写日志（因为没有实际改写）', r.log.length === 0, `实际日志: ${JSON.stringify(r.log)}`);
       }
 
-      // 上游 rewrite_cmd.rs:122 用 `process::exit(2)` 直接退出，全仓仅此一处 —— rtk 1.2.1
-      // 复核仍成立：`grep -rn 'process::exit(2)' src/` 只命中该行（另一处是文档注释）→
-      // exit 2 恒无输出。「exit 2 带消息」是不存在的组合，不构造该用例。
-      // 语义上是 deny：插件的定位是「透传桥、绝不阻断」，所以正确行为是原样执行。
-      eq(G_A, 'exit 2（deny，恒无输出）→ 原样执行',
+      // 上游 rewrite_cmd.rs:122 用 `process::exit(2)` 直接退出，全仓仅此一处 —— 该分支之前
+      // 没有 print，所以**纯 deny 恒无 stdout**。但规范 §① 明确：exit 2 的 stdout **可能是**
+      // 一条消息（pipeline 规则拒绝 / 路由提示，rtk 自己的 Rewrite help 也说「用它挡下那条消息」），
+      // 那条消息**不是命令行**。所以插件必须无条件丢弃 exit 2 的 stdout，而不是「因为不会有输出
+      // 所以不必处理」。这条消息本机不可构造（无 ~/.rtk/config.toml、无 ~/.claude/settings*.json，
+      // 规范 §⑦.3 已如实标注未实测），故用假 rtk 复刻该形态来锁住「丢弃」这条不变式。
+      eq(G_A, 'exit 2（deny，无 stdout）→ 原样执行',
         await executedCommand(executor, { command: 'git status' }, 'deny2empty'), 'git status');
       {
         // exit 2 是上游定义的正常分支，不属「异常」——不应产生告警噪声
         process.env.FAKE_SCENARIO = 'deny2empty';
         const r = await runExecute(executor, { command: 'git status' });
         check(G_A, 'exit 2 是已定义分支 → 不产生告警', r.warn.length === 0, `实际告警: ${JSON.stringify(r.warn)}`);
+      }
+      {
+        // ★ 规范 §①：exit 2 可能带一条 pipeline 规则消息 —— 它绝不能被当成命令执行
+        process.env.FAKE_SCENARIO = 'deny2msg';
+        const r = await runExecute(executor, { command: 'git status' });
+        eq(G_A, '★ exit 2 + 非空 stdout（pipeline 规则消息）→ 丢弃 stdout、原命令照跑',
+          r.specs.at(-1)?.command, 'git status');
+        check(G_A, '★ exit 2 + 非空 stdout → 消息文本不得被当作命令执行',
+          !JSON.stringify(r.specs).includes('pipeline rule blocked'), `实际 spec: ${JSON.stringify(r.specs)}`);
+        check(G_A, '★ exit 2 + 非空 stdout → 不告警（deny 是已定义分支）',
+          r.warn.length === 0, `实际告警: ${JSON.stringify(r.warn)}`);
+        eq(G_A, '★ exit 2 + 非空 stdout → 只执行一次（不重试、不双跑）', r.specs.length, 1);
       }
 
       // 上游未定义的退出码：安全优先，不采纳来源不明的 stdout
@@ -487,34 +529,39 @@ async function main() {
 
       // 上游 registry.rs:832 的判定：`!has_compound && (starts_with("rtk ") || == "rtk")`
       // —— 只对**非复合**命令做恒等短路。插件侧的最优行为同样是不必再 spawn 一次 rtk。
+      //
+      // 期望值写死成表（label / 命令 / 最终必须执行的命令 / 期望 spawn 次数），而不是用
+      // 「原样或加一层前缀」这种宽松公式：前置空白那一条的正确答案是**归一化**（`   rtk git status`
+      // → `rtk git status`，规范 §② 末条 + §③ 唯一分歧点），宽松公式会把它判错。
+      // 假 rtk 已复刻真 rtk 的 trim 比较 + 恒等守卫，所以这里不需要真 rtk 也能锁住形态。
       const guardCases = [
-        ['裸 rtk', 'rtk'],
-        ['rtk 前缀命令', 'rtk git status'],
-        ['rtk.exe 前缀命令', 'rtk.exe git status'],
-        ['大小写变体 RTK', 'RTK git status'],
-        ['大小写变体 RTK.EXE', 'RTK.EXE git status'],
-        ['绝对路径 rtk.exe', 'C:\\Users\\Sjc\\.local\\bin\\rtk.exe git status'],
-        ['正斜杠绝对路径', 'C:/Users/Sjc/.local/bin/rtk.exe git status'],
-        ['相对路径 ./rtk', './rtk git status'],
-        ['POSIX 绝对路径', '/usr/local/bin/rtk git status'],
-        ['双引号形式', '"rtk" git status'],
-        ['单引号形式', "'rtk' git status"],
-        ['env 前缀', 'RTK_DISABLED=1 rtk git status'],
-        ['前置空白 + rtk', '   rtk git status'],
+        ['裸 rtk', 'rtk', 'rtk', 0],
+        ['rtk 前缀命令', 'rtk git status', 'rtk git status', 0],
+        ['rtk.exe 前缀命令', 'rtk.exe git status', 'rtk.exe git status', 0],
+        ['大小写变体 RTK', 'RTK git status', 'RTK git status', 0],
+        ['大小写变体 RTK.EXE', 'RTK.EXE git status', 'RTK.EXE git status', 0],
+        ['绝对路径 rtk.exe', 'C:\\Users\\Sjc\\.local\\bin\\rtk.exe git status', 'C:\\Users\\Sjc\\.local\\bin\\rtk.exe git status', 0],
+        ['正斜杠绝对路径', 'C:/Users/Sjc/.local/bin/rtk.exe git status', 'C:/Users/Sjc/.local/bin/rtk.exe git status', 0],
+        ['相对路径 ./rtk', './rtk git status', './rtk git status', 0],
+        ['POSIX 绝对路径', '/usr/local/bin/rtk git status', '/usr/local/bin/rtk git status', 0],
+        ['双引号形式', '"rtk" git status', '"rtk" git status', 0],
+        ['单引号形式', "'rtk' git status", "'rtk' git status", 0],
+        ['env 前缀', 'RTK_DISABLED=1 rtk git status', 'RTK_DISABLED=1 rtk git status', 0],
+        // 规范 §② 末条 / §③ 唯一分歧点：rtk 比较的是 trim 后的行，并回吐 trim 后的形态，
+        // 所以前导空白的 rtk 命令是一次**真实改写**（去空白），插件必须交给 rtk，不能 skip。
+        ['前置空白 + rtk（归一到 trim 形态）', '   rtk git status', 'rtk git status', 1],
       ];
-      for (const [label, cmd] of guardCases) {
+      for (const [label, cmd, want, wantCalls] of guardCases) {
         resetRtkCalls();
         const executed = await executedCommand(executor, { command: cmd });
         const calls = rtkCallCount();
         // 红线：无论是否跳过，最终执行的绝不能出现 `rtk rtk` / `rtk rtk.exe`
         check(G_C, `${label} → 不产生 rtk rtk 双重改写`, !/(^|\s)rtk(\.exe)?\s+rtk(\.exe)?(\s|$)/i.test(executed),
           `实际执行: ${JSON.stringify(executed)}`);
-        // 红线：命令不能被破坏（要么原样，要么被 rtk 加了一层前缀）
-        check(G_C, `${label} → 命令内容不被破坏`,
-          executed === cmd || executed.replace(/^rtk\s+/i, '') === cmd,
-          `实际执行: ${JSON.stringify(executed)}`);
-        // 优化断言：不该再 spawn 一次 rtk（上游已认定为 rtk 形式）
-        checkDivergence(G_C, `${label} → 不调用 rtk rewrite`, calls === 0, `实际调用 ${calls} 次: ${JSON.stringify(rtkCalls())}`);
+        // 红线：最终执行的必须是该命令按 rtk 契约应得的那一条
+        eq(G_C, `${label} → 最终执行 = rtk 契约产物`, executed, want);
+        // spawn 次数：已是 rtk 形态的不必再问 rtk；空白形态必须问（否则丢掉归一化）
+        eq(G_C, `${label} → spawn 次数`, calls, wantCalls);
       }
 
       // ★ 关键反例（lead 指定，最容易写错的地方）：
@@ -550,6 +597,132 @@ async function main() {
       resetRtkCalls();
       eq(G_C, '普通命令不受防护影响', await executedCommand(executor, { command: 'git status' }), 'rtk git status');
       check(G_C, '普通命令确实调用了 rtk rewrite', rtkCallCount() === 1, `实际调用 ${rtkCallCount()} 次`);
+    }
+
+    // ─────────── C2. 恒等守卫对拍（真 rtk，规范 §②③⑦） ───────────
+    // 判据不是「插件怎么写的」，而是「真 rtk 会怎么处理」：只要 rtk 会把某条命令改写成
+    // 语义不同的命令，插件就绝不能 skip（skip 就是漏掉那次改写）；插件最终执行的命令
+    // 也必须与 rtk 的契约产物语义等价（trim 后相同）。规范 §③ 唯一真实分歧
+    // `  rtk git status`（前导空白，rtk 自己会 trim 后回吐）只差空白，所以用
+    // 「差异仅在空白」的事实断言锁住，不把它算成硬失败。
+    const G_C2 = 'C2. 恒等守卫对拍（真 rtk）';
+    if (FAST) {
+      check(G_C2, 'FAST 模式跳过真 rtk 恒等守卫对拍（C 组假 rtk 已覆盖递归防护）', true);
+    } else if (!real.available) {
+      check(G_C2, '真实 rtk 可用', false, '未找到 rtk，跳过恒等守卫对拍');
+    } else {
+      const { mod, executor } = await loadExecutor(real.bin);
+      const trimEq = (a, b) => String(a).trim() === String(b).trim();
+      // rtkAbs 由真实 rtk 路径派生，避免把某台机器的用户名硬编码进断言
+      const rtkAbs = String(real.bin).replace(/\\/g, '/');
+      const guardCases = [
+        'rtk git status',
+        '  rtk git status',
+        'rtk',
+        'rtk.exe git status',
+        `${rtkAbs} git status`,
+        'RTK git status',
+        'Rtk git status',
+        'FOO=1 rtk git status',
+        'RTK_DISABLED=1 rtk git status',
+        'rtk=1 ls',
+        'rtkx git status',
+        'rtk-helper git status',
+        'sudo rtk git status',
+        'rtk git status && git log',
+        'ls && rtk git status',
+        'rtk git status || ls',
+      ];
+      for (const cmd of guardCases) {
+        const skip = mod.isRtkInvocation(cmd);
+        const { code, out } = await realRewrite(real.bin, cmd);
+        const expected = expectedCommandFor(cmd, code, out);
+        const actual = await executedCommand(executor, { command: cmd });
+        // 严格判据：只要 rtk 的 stdout 与原命令字面不同，就算一次真实改写（含仅去前导空白的
+        // 归一化，规范 §② 最后一条）—— 插件 skip 掉它就是漏改写，不能用「语义相同」放过。
+        const rtkRewrites = (code === 0 || code === 3) && out !== '' && out !== cmd;
+        // 红线①：rtk 会改写时插件 skip 就是漏改写
+        check(G_C2, `「${cmd}」→ 红线：rtk 会改写（exit ${code}）时插件不得 skip`,
+          !(skip && rtkRewrites), `rtk out=${JSON.stringify(out)}，插件 skip=${skip} —— 漏改写`);
+        // 红线②：最终执行必须与 rtk 契约产物语义等价（仅允许空白差异，即 §③ 的已知分歧）
+        check(G_C2, `「${cmd}」→ 最终执行与 rtk 契约语义等价（exit ${code}）`,
+          trimEq(actual, expected), `实际 ${JSON.stringify(actual)}，契约 ${JSON.stringify(expected)}`);
+        // 事实锁：带前后空白的输入，rtk 的改写就是「trim 后回吐」这一种（规范 §② 末条）
+        if (cmd !== cmd.trim()) {
+          eq(G_C2, `「${cmd}」→ rtk 对空白形态的改写恰为 trim 后的命令`, out, cmd.trim());
+        }
+      }
+
+      // 规范 §②/§③ 的唯一真实分歧点：前导空白形态。rtk 比较的是 trim 后的行并回吐 trim 后的
+      // 形态，所以 `  rtk git status` 是一次**真实改写**（去空白），插件不得 skip —— skip 就是
+      // 漏掉这次归一化，也正是 §③ 表里唯一标「与上游行为不一致」的那一条。这里按规范断言
+      // 「分歧已消除」，而不是断言旧的 skip=true 行为。
+      {
+        const padded = '  rtk git status';
+        const skip = mod.isRtkInvocation(padded);
+        const { code, out } = await realRewrite(real.bin, padded);
+        eq(G_C2, '§③ 分歧点：前导空白形态 rtk 实测 exit 3（真实改写，非恒等）', code, 3);
+        eq(G_C2, '§③ 分歧点：rtk 会 trim 掉前导空白后回吐', out, 'rtk git status');
+        check(G_C2, '§③ 分歧点已消除：插件不得 skip 前导空白形态（§②末条）',
+          skip === false, `skip=${skip} —— 会漏掉 rtk 的去空白归一化`);
+        eq(G_C2, '§③ 分歧点已消除：插件采纳 trim 后的形态',
+          await executedCommand(executor, { command: padded }), 'rtk git status');
+      }
+
+      // 规范 §⑦.1（已实测定论）：透明前缀 + 内部已是 rtk → 全部 exit 1
+      // （rtk 剥掉前缀后落进恒等守卫，不改写）
+      const prefixGuard = [
+        'uv run rtk git status', 'timeout 30 rtk git status', 'time rtk git status',
+        'noglob rtk git status', 'command rtk git status', 'exec rtk git status',
+        'nocorrect rtk git status', 'nice rtk git status',
+      ];
+      for (const cmd of prefixGuard) {
+        const skip = mod.isRtkInvocation(cmd);
+        const { code, out } = await realRewrite(real.bin, cmd);
+        eq(G_C2, `透明前缀「${cmd}」→ rtk 实测 exit 1（§⑦.1）`, code, 1);
+        // 规范 §⑤ 的硬要求：这些命令不得被 isRtkInvocation 误判为「已是 rtk 调用」而跳过。
+        check(G_C2, `透明前缀「${cmd}」→ 插件不得误判为已是 rtk 调用（§⑤）`,
+          skip === false, `插件 skip=${skip} —— 被误判为 rtk 调用`);
+        // 安全网（§⑦.1 的定论）：万一实现改成跳过，也必须能证明 rtk 对该命令 exit 1，即没有漏改写
+        check(G_C2, `透明前缀「${cmd}」→ 若跳过则必须 rtk exit 1（无漏改写）`,
+          !skip || code === 1, `skip=${skip} 但 rtk exit=${code} out=${JSON.stringify(out)}`);
+        eq(G_C2, `透明前缀「${cmd}」→ 原命令照跑`, await executedCommand(executor, { command: cmd }), cmd);
+      }
+      // 正向：透明前缀本身可穿透，内部命令要照常改写（插件不得把整条当 rtk 调用）
+      const prefixRewrite = ['uv run git status', 'timeout 30 git status', 'time git status', 'nice git status'];
+      for (const cmd of prefixRewrite) {
+        const skip = mod.isRtkInvocation(cmd);
+        const { code, out } = await realRewrite(real.bin, cmd);
+        const expected = expectedCommandFor(cmd, code, out);
+        const actual = await executedCommand(executor, { command: cmd });
+        check(G_C2, `透明前缀正向「${cmd}」→ 插件不 skip`, skip === false, `插件 skip=${skip}`);
+        eq(G_C2, `透明前缀正向「${cmd}」→ 采纳穿透后的改写`, actual, expected);
+        check(G_C2, `透明前缀正向「${cmd}」→ 改写结果确实带 rtk（exit ${code}）`,
+          code === 3 && out.includes('rtk '), `rtk out=${JSON.stringify(out)}`);
+      }
+
+      // 规范 §⑦.2：只有 openclaw 把 exit 3 抬成 0；插件必须同时认 0 与 3 两条分支。
+      // 未设 / claude / codex 走 exit 3 分支，openclaw 走 exit 0 分支 —— 两条都必须被采纳。
+      for (const host of [null, 'claude', 'codex', 'openclaw']) {
+        const label = host === null ? '(未设)' : host;
+        const wantCode = host === 'openclaw' ? 0 : 3;
+        const savedHost = process.env.RTK_REWRITE_HOST;
+        if (host === null) delete process.env.RTK_REWRITE_HOST;
+        else process.env.RTK_REWRITE_HOST = host;
+        try {
+          const direct = await realRewrite(real.bin, 'git status');
+          eq(G_C2, `RTK_REWRITE_HOST=${label} → rtk 契约退出码 ${wantCode}`, direct.code, wantCode);
+          eq(G_C2, `RTK_REWRITE_HOST=${label} → 插件采纳改写（exit ${wantCode} 分支）`,
+            await executedCommand(executor, { command: 'git status' }), 'rtk git status');
+          eq(G_C2, `RTK_REWRITE_HOST=${label} → rtk 对 rtk 前缀命令仍恒等回吐 exit ${wantCode}`,
+            (await realRewrite(real.bin, 'rtk git status')).code, wantCode);
+          eq(G_C2, `RTK_REWRITE_HOST=${label} → Get-ChildItem 仍 exit 1（无等价不变）`,
+            (await realRewrite(real.bin, 'Get-ChildItem')).code, 1);
+        } finally {
+          if (savedHost === undefined) delete process.env.RTK_REWRITE_HOST;
+          else process.env.RTK_REWRITE_HOST = savedHost;
+        }
+      }
     }
 
     // ─────────── D. 失败安全：所有失败路径都执行原命令 ───────────
@@ -825,7 +998,6 @@ async function main() {
             '"C:\\Program Files\\rtk\\rtk.exe" git status',
             'RTK_DISABLED=1 rtk git status',
             'FOO=bar BAZ=1 rtk git status',
-            '  rtk git status',
             'rtk git status && rtk git log',
             'rtk ls; rtk grep x',
             'rtk git status | rtk grep foo',
@@ -850,6 +1022,10 @@ async function main() {
           // 关键反例：含非 rtk 段的复合命令**不能**被判为「纯 rtk 调用」，否则首段丢失改写
           const no = [
             'git status', 'ls -la', 'echo rtk', 'echo hi', '',
+            // 规范 §② 末条 / §③ 唯一分歧点：rtk 比较的是 **trim 后** 的行并回吐 trim 形态，
+            // 所以带前后空白的 rtk 命令对 rtk 是一次真实改写（去空白），不是恒等调用。
+            // 插件若判为 true 就会 skip 掉这次归一化 —— 这正是 §③ 表里唯一的分歧。
+            '  rtk git status', 'rtk git status ', '\trtk git status', ' rtk', '  rtk  ',
             'ls -la && rtk git status',
             'rtk git status && ls -la',
             'ls; rtk git status',
@@ -881,6 +1057,42 @@ async function main() {
           for (const c of emptySegmentCases) {
             check(G_E, `${name}(${JSON.stringify(c)}) === true（空段/多余操作符不影响）`,
               fn(c) === true, `实际 ${JSON.stringify(fn(c))}`);
+          }
+
+          // 空白边缘类必须按 Rust 的 `is_whitespace` 判，而不是 JS 的 `trim()`：
+          // 两者恰好差 U+0085 NEL —— Rust 会 trim、JS 不会。实测 rtk 1.2.1：
+          // `"rtk git status\u0085"` -> exit 3 + `"rtk git status"`（真实改写），
+          // 所以这里必须返回 false 把归一化交给 rtk，否则就是一次漏改写。
+          const edgeWhitespaceCases = [
+            'rtk git status\u0085', '\u0085rtk git status',
+            'rtk git status\t', 'rtk git status\n', 'rtk git status\u00a0',
+            'rtk git status\u3000', 'rtk git status\u2028',
+          ];
+          for (const c of edgeWhitespaceCases) {
+            check(G_E, `${name}(${JSON.stringify(c)}) === false（边缘空白交回 rtk 归一化）`,
+              fn(c) === false, `实际 ${JSON.stringify(fn(c))} —— 漏掉去空白归一化`);
+          }
+
+          // 透明前缀（规范 §⑤ / §⑦.1）：包装命令必须保留自己的首词，绝不能被判成
+          // 「已是 rtk 调用」，否则 rtk 就没有机会剥前缀再改写内部命令
+          // （`uv run pytest` -> `uv run rtk pytest`）。
+          // 这一组**不依赖真 rtk**，所以放在 E 组而不是 C2 组 —— 审查 P1-2 指出：
+          // 透明前缀的不变量原先只在 C2（受 RTK_TEST_FAST 跳过）里有断言，
+          // 而 CI 固定跑 FAST，等于发布门禁上没有裁判。
+          const transparentPrefixCases = [
+            'uv run git status', 'uv run pytest', 'uv run rtk git status',
+            'timeout 30 git status', 'timeout 30 rtk git status',
+            'time git status', 'time rtk git status',
+            'nice git status', 'nice -n 5 rtk git status',
+            'noglob git status', 'noglob rtk git status',
+            'command git status', 'command rtk git status',
+            'exec git status', 'exec rtk git status',
+            'nocorrect git status', 'nocorrect rtk git status',
+            'direnv exec . git status',
+          ];
+          for (const c of transparentPrefixCases) {
+            check(G_E, `${name}(${JSON.stringify(c)}) === false（透明前缀不得被误判）`,
+              fn(c) === false, `实际 ${JSON.stringify(fn(c))} —— 被误判为已是 rtk 调用`);
           }
         }
       }
@@ -915,6 +1127,52 @@ async function main() {
         const { code, out } = await realRewrite(real.bin, 'ls | grep foo');
         check(G_F, '管道：rtk 只改写能识别的段，插件不改结构', code === 3 && out === 'ls | rtk grep foo',
           `rtk 实测 exit=${code} out=${JSON.stringify(out)}`);
+      }
+      // ── 规范 §④：复合 / 后台 / 管道 / 分组 / 续行 / 多行（真 rtk）──
+      // 每条都用 rtk 真实产物当预言机，同时断言 rtk 侧退出码（规范 §④ 已定论），
+      // 双向锁：rtk 行为漂移会红，插件偏离 rtk 契约也会红。
+      const CONT = 'git status \\\ngit log';   // 行继续符：反斜杠 + 换行
+      const MULTI = 'git status\ngit log';             // 真换行
+      const compoundCases = [
+        // [命令, rtk 期望退出码, 依据规范 §④ 的说明]
+        ['git status & git log', 3, '后台 & → 两段各自改写'],
+        ['sleep 1 & git status', 3, '后台 & → 只改能识别的段'],
+        ['git status |& git log', 1, '|& 不支持 → 整条拒绝'],
+        ['git status;;git log', 3, ';; → 逐段改写'],
+        ['{ git status; }', 1, '花括号分组 → 拒绝'],
+        ['(git status)', 1, '子 shell 分组 → 拒绝'],
+        ['git status 2>&1', 3, '2>&1 非写重定向 → 可改写'],
+        ['cat -v f.txt', 1, 'cat 非 -n 旗标 → 拒绝'],
+        ['cat -n f.txt', 3, 'cat -n → rtk read -n'],
+        ['if true; then git status; fi', 1, 'BLOCK_KEYWORDS 打头 → 拒绝'],
+        [CONT, 3, '行继续符 → 折叠成单行'],
+        [MULTI, 3, '多行 → 逐行改写'],
+      ];
+      for (const [cmd, wantCode, note] of compoundCases) {
+        const { code, out } = await realRewrite(real.bin, cmd);
+        const expected = expectedCommandFor(cmd, code, out);
+        const actual = await executedCommand(executor, { command: cmd });
+        eq(G_F, `[§④ ${note}] rtk 退出码`, code, wantCode);
+        eq(G_F, `[§④ ${note}] ${JSON.stringify(cmd)} → 与 rtk 契约一致`, actual, expected,
+          `rtk 输出 ${JSON.stringify(out)}`);
+        // 拒绝改写的用例：插件必须原样执行，不得自作主张加前缀
+        if (wantCode === 1) {
+          eq(G_F, `[§④ ${note}] 拒绝改写时插件原样执行`, actual, cmd);
+        }
+      }
+      // 形态锁：避免「契约一致」掩盖两边的形态差异
+      {
+        const cont = await realRewrite(real.bin, CONT);
+        eq(G_F, '续行符 → rtk 折叠成单行（不得残留换行）', cont.out, 'rtk git status git log');
+        eq(G_F, '续行符 → 插件采纳折叠后的单行',
+          await executedCommand(executor, { command: CONT }), 'rtk git status git log');
+        const multi = await realRewrite(real.bin, MULTI);
+        eq(G_F, '多行 → rtk 输出保持两行', multi.out.split(String.fromCharCode(10)).length, 2);
+        eq(G_F, '多行 → 两行各自带 rtk', multi.out,
+          ['rtk git status', 'rtk git log'].join(String.fromCharCode(10)));
+        eq(G_F, '多行 → 插件采纳逐行改写结果',
+          await executedCommand(executor, { command: MULTI }),
+          ['rtk git status', 'rtk git log'].join(String.fromCharCode(10)));
       }
     }
 

@@ -35,8 +35,9 @@
  *    (cloud/dotnet/git/go/js/jvm/php/python/ruby/rust/scala/system/...) from
  *    its own rule registry, so new rtk families are covered for free.
  *  - `isRtkInvocation` is a best-effort fast path that skips rewriting when
- *    every segment already calls rtk; it does not read through wrappers or
- *    quoted env values, and the misses are safe (see its own comment).
+ *    every segment already calls rtk; it does not read through transparent
+ *    wrappers (`uv run rtk ...`) or quoted env values (`FOO="a b" rtk ...`), and
+ *    those misses are safe (its own comment carries the measured evidence).
  */
 import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -204,24 +205,78 @@ function isRtkSegment(segment) {
  * True when every segment of `command` already invokes rtk, so rewriting it
  * would only ask rtk to echo the line back.
  *
+ * Upstream guard this parallels (`registry.rs`; the line numbers below are the
+ * `origin/develop` snapshot `24ff2267`, which is what rtk 1.2.1 ships — on the older
+ * checkout `bd7f87e` the same two sites sit at `:836` / `:2008`):
+ *   - single-command entry `:832` — `!has_compound && (trimmed.starts_with("rtk ")
+ *     || trimmed == "rtk")` returns `trimmed` unchanged;
+ *   - compound-segment entry `:2004` — the same `starts_with("rtk ") || == "rtk"`
+ *     test, applied per segment.
+ * So upstream is case-sensitive, literal-only, does not reduce a path to its
+ * basename, and never short-circuits a compound line as a whole.
+ *
  * Segment-aware on purpose: `ls -la && rtk git status` must still reach rtk,
  * because its first segment deserves a rewrite. Bare `startsWith('rtk ')`
  * missed the qualified/quoted/case-variant spellings; a whole-string
- * `includes('rtk ')` test would skip the mixed line above.
+ * `includes('rtk ')` test would skip the mixed line above. All-rtk compounds
+ * (`rtk git status && rtk git log`) are skipped here safely: every segment hits
+ * the `:2004` guard and upstream answers exit 1 with no rewrite (spec §③).
  *
- * This is a fast path, not a complete recogniser. It does not read through a
- * wrapper (`sudo rtk ...`, `powershell -c "rtk ..."`), a quoted env value
- * (`FOO="a b" rtk ...`), an assignment whose name collides (`rtk=1 ls`), a
- * CRLF line break, or a `#` comment. Those all return false and simply get
- * rewritten once more, which is safe because rtk exits 1 on a first word it
- * does not recognise — so safety here leans on upstream's tolerance, and it
- * needs revisiting if rtk ever starts rewriting through `sudo`/`powershell`.
- * rtk's own guard is case-sensitive and literal-only (`registry.rs:832`,
- * `:2004`, line numbers as of rtk 1.2.1), so this is still deliberately
- * broader than upstream.
+ * Deliberately wider than upstream on three axes (upstream's own test is the narrow
+ * literal one quoted above; this recogniser accepts more spellings as "already rtk").
+ * Each widening only ever
+ * skips a spawn that upstream would have answered with exit 1 — i.e. it can never
+ * lose a rewrite, because rtk rewrote nothing there to begin with:
+ *   - case-insensitive (`RTK git status`, `Rtk Git Status`, `RTK.EXE ...`) —
+ *     upstream exits 1 on the literal-only test (spec §③ row 大小写变体).
+ *   - basename-normalised (`./rtk ...`, `/usr/local/bin/rtk ...`, `rtk.exe ...`,
+ *     `C:/Users/.../rtk.exe ...`, `"rtk" ...`) — upstream exits 1 for every one
+ *     of these spellings, since it never resolves a path (spec §③ rows 相对路径 /
+ *     POSIX 绝对路径 / rtk.exe).
+ *   - `FOO=1` / `RTK_DISABLED=1` env prefixes stripped — upstream matches the raw
+ *     first word and exits 1 (spec §③ row env 前缀).
+ * The prefixes it deliberately does NOT read through are the transparent wrappers
+ * `uv run`, `timeout`, `time`, `nice`, `noglob`, `command`, `builtin`, `exec`,
+ * `nocorrect` (upstream tables `ROUTABLE_WRAPPER_PREFIXES` `registry.rs:1435`,
+ * `SHELL_KEYWORD_PREFIXES` `:1439`, `PROCESS_WRAPPERS` `timeout`/`time`/`nice`,
+ * depth cap `MAX_PREFIX_DEPTH = 10` `:1581`). Those keep their own first word here,
+ * so the line goes to rtk, which is required — rtk peels the wrapper and rewrites
+ * the inner command (`uv run pytest` -> `uv run rtk pytest`, spec §⑤).
+ * Their rtk-inner forms
+ * (`uv run rtk git status`, `timeout 30 rtk git status`, `time git status`-style
+ * variants, `noglob/command/exec/nocorrect rtk ...`) are exit 1 upstream after the
+ * peel reaches the guard (spec §⑦.1), so skipping those would be safe too — but
+ * returning false costs one spawn and keeps the recogniser honest.
+ *
+ * Whitespace is the one axis where a wider test is wrong, so it short-circuits
+ * first: upstream compares the *trimmed* line and echoes the trimmed string back,
+ * so `"  rtk git status"`, `"rtk git status "`, `"\trtk git status"`, `" rtk"` and
+ * `"rtk "` are all exit 3 + a rewritten string that differs from the input
+ * (spec §② last bullet; it was the single divergence §③ found). Those must reach
+ * rtk so the normalised form is adopted instead of silently skipped.
+ *
+ * Still a fast path, not a complete recogniser: it does not read through a wrapper
+ * (`sudo rtk ...`, `powershell -c "rtk ..."`), a quoted env value
+ * (`FOO="a b" rtk ...`), an assignment whose name collides (`rtk=1 ls`), a CRLF
+ * line break, or a `#` comment. Those return false and simply get rewritten once
+ * more, which is harmless because rtk exits 1 on a first word it does not
+ * recognise — so that side leans on upstream's tolerance and needs revisiting if
+ * rtk ever starts rewriting through `sudo`/`powershell`.
  */
 export function isRtkInvocation(command) {
-  const segments = splitSegments(String(command));
+  const text = String(command);
+  // Leading/trailing whitespace must reach rtk, never be skipped: rtk compares the
+  // trimmed line and echoes the trimmed form, so `"  rtk git status"` is exit 3 +
+  // `"rtk git status"` — a genuine rewrite. Skipping it here would swallow that
+  // normalisation (the one place this fast path disagreed with upstream).
+  //
+  // The edge class is Rust's `char::is_whitespace`, not JS `String.prototype.trim`:
+  // the two differ by exactly U+0085 NEL, which Rust trims and JS does not. Measured:
+  // `"rtk git status\u0085"` -> rtk exit 3 + `"rtk git status"` (a real rewrite),
+  // so a plain `.trim()` comparison would skip it and lose the normalisation.
+  // `\s` covers the rest of Rust's set (TAB..CR, SP, NBSP, Zs, U+FEFF).
+  if (/^[\s\u0085]|[\s\u0085]$/.test(text)) return false;
+  const segments = splitSegments(text);
   return segments.length > 0 && segments.every(isRtkSegment);
 }
 
@@ -232,7 +287,10 @@ export function isRtkInvocation(command) {
  *
  * Exit-code contract (`src/hooks/rewrite_cmd.rs:110-125` in rtk 1.2.1,
  * unchanged since 0.50.0; mirrored in `rtk rewrite --help`):
- * 0 = rewritten, allow rules cover every command;
+ * 0 = rewritten, allow rules cover every command; it is also what an
+ * `RTK_REWRITE_HOST=openclaw` host reports where the default is 3 (`claude`,
+ * `codex`, `pi`, `hermes`, `omp`, `opencode` and unset all stay 3), so both codes
+ * have to be accepted;
  * 3 = rewritten, host must confirm (the normal case — no rules configured);
  * 1 = nothing rewritten, run unchanged; 2 = a deny rule matched. 0 and 3 both
  * carry the line on stdout, and rtk does NOT suppress identity rewrites, so the

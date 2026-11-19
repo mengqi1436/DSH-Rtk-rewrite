@@ -66,6 +66,28 @@ rtk 按生态把过滤器放在 `src/cmds/` 下
 （`sudo …`、带写重定向的 `git status > out.txt`、带 `--json` 的 `gh`、带 `-n` 以外旗标的
 `cat`）。这是预期行为：没有等价意味着没有收益，不是出错。
 
+### rtk 会穿透的透明前缀
+
+rtk 会对包装命令**剥掉前缀、改写内部命令，再把前缀装回去**。这是 rtk 侧行为（上游常量
+`ROUTABLE_WRAPPER_PREFIXES`、`SHELL_KEYWORD_PREFIXES`、`PROCESS_WRAPPERS`，剥壳深度上限
+`MAX_PREFIX_DEPTH = 10`）；插件把整条命令交给 `rtk rewrite`，自己不做任何前缀处理。
+rtk 1.2.1 实测：
+
+| 输入 | 实测输出 |
+|------|----------|
+| `uv run pytest` | exit 3 → `uv run rtk pytest` |
+| `timeout 30 git status` | exit 3 → `timeout 30 rtk git status` |
+| `time git status` | exit 3 → `time rtk git status` |
+| `nice git status` | exit 3 → `nice rtk git status` |
+| `noglob git status` / `command git status` / `builtin git status` / `exec git status` / `nocorrect git status` | exit 3 → 各自保留前缀，内部命令加上 `rtk` |
+| `direnv exec . git status` | **exit 1**（`direnv exec` 不在内置表，不改写） |
+
+插件对这些命令**不会**误判成「已是 rtk 调用」而跳过：`isRtkInvocation` 对
+`uv run rtk git status`、`timeout 30 rtk git status`、`time rtk git status`、
+`nice rtk git status`、`noglob/command/builtin/exec/nocorrect rtk git status`
+一律返回 false（逐条实测）。跳过也没有收益——rtk 剥掉前缀后发现内部已是 `rtk`，会落进
+恒等守卫，实测这些形态全部 **exit 1**。
+
 ## 兼容性验证
 
 **`@deepseek-ai/dsh-bash-sandbox`**（Linux/macOS 侧基类，v1.2.0 起）：bash 沙箱
@@ -179,6 +201,40 @@ peer 范围 `>=0.2.0-rc.1 <0.3.0-0` 覆盖 0.2.2-rc.5。
 | 0.51.0 | 2026-10-03 | 不变 |
 | 1.1.0（本机） | 2026-11-08 | 不变；上文命令族表的全部实测即基于此版本 |
 | 1.2.1（本机，当前） | 2026-11-20 | 不变；exit 3/1 语义、恒等透传、复合与管道改写、`RTK_DISABLED=` 前缀全部复现；v1.2.0→v1.2.1 的改动集中在 cargo 前缀路由、proxy 与 hook 完整性，未触及 `rewrite` 契约 |
+
+**恒等守卫是字面量且大小写敏感的——这是 rtk 侧的一条硬上限。** rtk 只在首词字面等于
+`rtk ` 时才认为「已是 rtk 调用」（大小写敏感、不认路径、不认 `.exe`）。所以下面这些形态
+rtk 都当作**普通命令**处理，实测全部 **exit 1**（不改写）：
+
+| 输入 | rtk 1.2.1 实测 |
+|------|----------------|
+| `RTK git status` | exit 1 |
+| `./rtk git status` | exit 1 |
+| `rtk.exe git status` | exit 1 |
+| `<rtk 绝对路径> git status`（如 `C:/.../rtk.exe git status`） | exit 1 |
+| `  rtk git status`（前导两空格） | exit 3 → `rtk git status`（trim 后命中守卫） |
+
+排查「为什么我的命令没被改写」时这条最常被忽略：**把 rtk 写成别的大小写或带路径，rtk 就
+不再认它是 rtk 调用**。插件侧的判定比上游宽（大小写、路径、`.exe`、`ENV=x` 前缀都算
+rtk 调用），方向是「插件跳过 → rtk 本来就 exit 1」，结论一致、无漏改写；这一点由下方
+「行为对拍（parity）」一节逐条核对。
+
+**`RTK_REWRITE_HOST` 只把 3 抬成 0，不改变改写内容。** 以 `git status` 为探针实测：
+
+| 取值 | 退出码 |
+|------|--------|
+| 未设 / `claude` / `codex` / `pi` / `hermes` / `omp` / `opencode` | 3 |
+| `openclaw` | 0 |
+
+`openclaw` 下 `Get-ChildItem` 仍 exit 1（无等价，不变），`rtk git status` 变 exit 0
+但仍原样回吐 `rtk git status`（插件靠结果与输入的字符串比较抑制）。所以同时认 0 与 3
+是必需的，当前实现已满足。
+
+**exit 2 带消息这条只有上游源码与 help 文案支撑，本机未能构造。** 本机既无
+`~/.claude/settings*.json` 也无 `~/.rtk/config.toml`，构造不出 pipeline 规则拒绝，所以
+「exit 2 + 一条消息」的实际输出没有实测样本。插件对它一律丢弃 stdout、原命令照跑、不告警
+——这是保守方向：上游 help 明说该消息是拒绝/路由提示而**不是命令行**，采纳它会把一条提示
+当成命令执行。
 
 插件本身与平台无关：它只消费 `rtk rewrite` 的**进程契约**（退出码 + stdout），同一
 rtk 版本的 Windows/Linux/macOS 构建契约一致。Linux 特有的问题（非登录 SSH shell 的
@@ -378,23 +434,33 @@ shell、可能不加载 `~/.profile`，此时在 harness 启动环境里显式�
   （`run` 被 rtk 吞掉）。这些都是 rtk 侧行为，结果都只是「执行原命令」。
 - **`rtk rewrite` 不做恒等抑制。** 已是 rtk 形态的命令在 exit 0/3 下原样返回，抑制是
   调用方的责任——所以插件要把结果与输入比较。
-- **管道里的 `wc` 段不改写**，尽管上游 `hooks/README.md` 把它列为 pipeline-safe；
-  rtk 1.2.1 实测 `ls | wc -l` 与 `git log | wc -l` → exit 1。落后于实际的是上游文档，
-  不是本插件。
+- **管道、分组与部分旗标按 rtk 自己的口径取舍。** rtk 1.2.1 逐条实测：
+  `ls | wc -l` 与 `git log | wc -l` 都 **exit 1**（上游 `hooks/README.md` 把 `wc` 列为
+  pipeline-safe，与实测不一致）；`git status |& git log` **exit 1**（不支持 `|&`）；
+  `{ git status; }` 与 `( git status )` **exit 1**（分组不改写）；`cat -v f.txt` **exit 1**
+  但 `cat -n f.txt` → `rtk read -n f.txt`（只有 `-n` 一个旗标被建模）。对照：
+  `git status | head -5` → `rtk git status | head -5`（只改 producer），
+  `git status 2>&1` → `rtk git status 2>&1`（`2>&1` 不算写重定向）。
+  以上都是 rtk 侧行为，结果只是「执行原命令」。
 
 ## 验证
 
 ```powershell
-node test.js               # 零依赖套件，9 组（项数随覆盖增加，以末尾统计行为准）
-                           #   A rewrite 退出码契约（注入假 rtk）
-                           #   B rtk 缺失 / 只告警一次
-                           #   C 递归防护
-                           #   D 失败安全
-                           #   E 纯函数单测
-                           #   F 复合命令与管道（真 rtk）
-                           #   G 命令族冒烟（12 个族全覆盖，真 rtk）
-                           #   H 模块契约（导出、package.json、patch 文件）
-                           #   I 多端 bash 执行器（经 RTK_TEST_PLATFORM 跑 linux/darwin
+node test.js               # 零依赖套件，14 组（项数随覆盖增加，以末尾统计行为准）
+                           #   A  rewrite 退出码契约（注入假 rtk，含 exit 2 带消息）
+                           #   B  rtk 缺失 / 只告警一次
+                           #   C  递归防护（显式期望表：命令 / 契约产物 / spawn 次数）
+                           #   C2 恒等守卫对拍（真 rtk，含透明前缀与 RTK_REWRITE_HOST）
+                           #   D  失败安全
+                           #   D2 失败安全补充
+                           #   E0 导出面与模块边界
+                           #   E1a isRtkInvocation 纯函数单测
+                           #   E1b 以 - 开头的命令（真 rtk）
+                           #   E  isRtkInvocation 纯函数单测（补充集）
+                           #   F  复合命令与管道（真 rtk）
+                           #   G  命令族冒烟（12 个族全覆盖，真 rtk）
+                           #   H  模块契约（导出、package.json、patch 文件）
+                           #   I  多端 bash 执行器（经 RTK_TEST_PLATFORM 跑 linux/darwin
                            #      分支，走真实模块加载路径）
 ```
 
@@ -427,6 +493,61 @@ rtk rewrite "git status"          # exit 3，输出：rtk git status
 rtk rewrite "Get-ChildItem"       # exit 1，无输出
 ```
 
+## 行为对拍（parity）
+
+插件对「是否已是 rtk 调用」的判定（`isRtkInvocation`）必须与 rtk 自己的守卫一致；这
+一致性不靠读源码断言，而靠一个可复现的对拍脚本逐条核对。
+
+**三路取证**（rtk 把规则表整张编译进二进制，没有资源段或配置文件可改，所以三路必须互相
+印证）：
+
+1. **静态 PE 取证**（REA）：目标 `rtk.exe`，rtk 1.2.1，PE32+ amd64，
+   `sha256=54a980783fc18816b51f2100d714fbe1c7ce1c3f9d88d65f38dd17ac849a0c25`，
+   18,560,000 字节；无 delay-import、无 PE 资源目录（`directories: []`、`resources: []`）
+   ——规则表、过滤器、权限规则全部编译进 `.rdata`。
+2. **上游源码定点**：本地 `` `<repo>/../_upstream/rtk` `` 克隆的 `origin/develop` =
+   `dev-1.2.0-rc.620-147-g24ff2267`；`rewrite` 契约文件自 `bd7f87e` 起零改动。恒等守卫在
+   `registry.rs:832`（单行入口）与 `:2004`（复合段入口）。
+3. **进程级 oracle**：直接取 `rtk.exe rewrite "<cmd>"` 的真实退出码与 stdout，本机二进制
+   即 oracle，不依赖任何硬编码期望值。
+
+本机 REA 的分层后端不可用（Ghidra 未配置、Hopper 不支持 win32、IDA/Kuna 未配置，Windows
+进程捕获亦不可用），所以**行为面结论一律以第 3 路实机 oracle 为准**，第 1、2 路用于解释
+「为什么」。这条界限写在 `.planning/2026-11-20-rtk-parity/rtk-rewrite-behavior-spec.md` 里。
+
+**跑法**（需要 `rtk` 可执行文件在 `PATH` 上——脚本内用 `execFileSync('rtk', …)`；非 PATH
+安装时改脚本内 spawn 目标）：
+
+```bash
+node .planning/2026-11-20-rtk-parity/probe-parity.mjs
+```
+
+脚本对 47 条用例逐条做两件事：调插件的 `isRtkInvocation(cmd)`，再调真实
+`rtk rewrite "<cmd>"`；分歧判据是「插件跳过（不 spawn）但 rtk 其实会改写」。反向的
+「插件不跳过但 rtk 无改写」只多一次 spawn、无害，不计为分歧。
+
+**当前实测输出**（rtk 1.2.1，本机，v1.1.14 修复后）：
+
+```
+总用例: 47 | 分歧(漏改写): 0
+--- 分歧明细（插件跳过但 rtk 会改写）---
+```
+
+**分歧计数 47 条里 0 条。** 另有两条边缘空白变体同样被修复：Rust 的
+`char::is_whitespace` 包含 U+0085 NEL 而 JS 的 `trim()` 不包含，实测
+`"rtk git status\u0085"` → exit 3 + `"rtk git status"`（真实改写），所以插件按
+`/^[\s\u0085]|[\s\u0085]$/` 判边缘空白，而不是直接用 `trim()` 比较。
+
+修复前是 1 条：`"  rtk git status"`（空白变体）被插件判为
+rtk 调用而不 spawn，而 rtk 会 trim 后回吐一份去掉空白前缀的 `rtk git status`。按
+[rtk 版本兼容性](#rtk-版本兼容性) 里说明的契约，stdout ≠ 输入就是一次真实改写，**必须采纳**
+——不能以「语义相同」放过。修法是 `isRtkInvocation` 在分段判定之前先做
+`text !== text.trim()` 短路返回 false，把空白形态交给 rtk 自己归一化。
+
+另有 `lead-verify.mjs` 一份 113 条用例的加宽对拍（覆盖复合/管道/后台/多行/空白 4 类/
+纯 rtk 的 8 种写法/透明前缀 9 种/拒绝改写 20 类），不变式违规同样为 **0**，
+「多一次 spawn」43 条（无害，不计为分歧）。
+
 ## 文件结构
 
 ```
@@ -434,7 +555,7 @@ rtk rewrite "Get-ChildItem"       # exit 1，无输出
 │                     # isRtkInvocation + rtkRewrite + execute；win32 → pwsh 基类，其余 → bash 基类）
 ├── cordis.patch.yml  # bundle patch：禁用 pwsh/bash-sandbox + 插入 rtk-pwsh-shell / rtk-bash-shell
 ├── package.json      # dsh.bundle.patch 指向 patch 文件；无运行时 npm 依赖
-├── test.js           # 零依赖验证套件（9 组）
+├── test.js           # 零依赖验证套件（14 组）
 ├── README.md         # English
 └── README_zh.md      # 中文（本文件）
 ```

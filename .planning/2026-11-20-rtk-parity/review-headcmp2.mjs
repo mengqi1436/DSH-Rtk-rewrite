@@ -1,0 +1,14 @@
+import { execFileSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+import path from 'node:path';
+const ROOT = process.cwd();
+const headFile = path.join(ROOT, '.planning/2026-11-20-rtk-parity/mutants/head-index.js');
+writeFileSync(headFile, execFileSync('git', ['show', 'HEAD:index.js'], { encoding: 'utf8' }));
+process.env.DSH_INSTALL_PACKAGE_JSON = path.join(ROOT, '.planning/2026-11-20-rtk-parity/fakedsh/package.json');
+const NEL = String.fromCodePoint(0x85);
+const cases = ['rtk git status' + NEL, NEL + 'rtk git status', '  rtk git status', 'rtk git status', 'rtk git status' + NEL + 'rtk ls'];
+const head = await import(pathToFileURL(headFile).href + '?a=1');
+const cur = await import(pathToFileURL(path.join(ROOT, 'index.js')).href + '?b=1');
+console.log('HEAD(修复前):', cases.map(c => JSON.stringify(c) + '=' + head.isRtkInvocation(c)).join('  '));
+console.log('当前(修复后):', cases.map(c => JSON.stringify(c) + '=' + cur.isRtkInvocation(c)).join('  '));

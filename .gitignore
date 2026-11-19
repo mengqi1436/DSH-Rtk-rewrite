@@ -1,1 +1,4 @@
 node_modules/
+.planning/**/mutants/
+.planning/**/fakebin/
+.planning/**/fakedsh/

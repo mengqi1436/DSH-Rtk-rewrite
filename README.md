@@ -73,6 +73,30 @@ Commands with no rtk equivalent exit 1 and run untouched. In practice that means
 write redirect such as `git status > out.txt`, `gh` with `--json`, `cat` with flags other
 than `-n`). That is expected: no equivalent means no savings, not a failure.
 
+### Transparent prefixes rtk peels through
+
+rtk **strips a wrapper prefix, rewrites the inner command, and puts the prefix back**.
+That is rtk-side behaviour (upstream constants `ROUTABLE_WRAPPER_PREFIXES`,
+`SHELL_KEYWORD_PREFIXES`, `PROCESS_WRAPPERS`; the peel depth cap is
+`MAX_PREFIX_DEPTH = 10`); the plugin hands rtk the whole command and does no prefix
+handling of its own. Measured on rtk 1.2.1:
+
+| Input | Measured output |
+|-------|-----------------|
+| `uv run pytest` | exit 3 → `uv run rtk pytest` |
+| `timeout 30 git status` | exit 3 → `timeout 30 rtk git status` |
+| `time git status` | exit 3 → `time rtk git status` |
+| `nice git status` | exit 3 → `nice rtk git status` |
+| `noglob git status` / `command git status` / `builtin git status` / `exec git status` / `nocorrect git status` | exit 3 → prefix kept, inner command gets `rtk` |
+| `direnv exec . git status` | **exit 1** (`direnv exec` is not in the built-in table, no rewrite) |
+
+The plugin does **not** misread these as "already an rtk invocation":
+`isRtkInvocation` returns false for `uv run rtk git status`,
+`timeout 30 rtk git status`, `time rtk git status`, `nice rtk git status` and
+`noglob/command/builtin/exec/nocorrect rtk git status` (measured one by one). Skipping
+them would gain nothing either — after peeling the prefix rtk finds `rtk` inside and falls
+into its identity guard, and every one of those shapes measures **exit 1**.
+
 ## Compatibility
 
 **`@deepseek-ai/dsh-bash-sandbox`** (the Linux/macOS base, since v1.2.0): the bash
@@ -214,6 +238,47 @@ internals. That contract has been stable across every version probed:
 | 0.51.0 | 2026-10-03 | unchanged |
 | 1.1.0 (this machine) | 2026-11-08 | unchanged; also the version the full command-family table above was measured on |
 | 1.2.1 (this machine, current) | 2026-11-20 | unchanged; exit 3/1 semantics, identity pass-through, compound/pipeline rewriting and the `RTK_DISABLED=` prefix all reproduce. The v1.2.0→v1.2.1 changes are confined to cargo prefix routing, the proxy and hook integrity — the `rewrite` contract is untouched |
+
+**The identity guard is a literal, case-sensitive match — a hard ceiling on the rtk side.**
+rtk only treats a command as "already an rtk invocation" when the first word is literally
+`rtk ` (case-sensitive, no path form, no `.exe` form). So all of the following are taken
+as **ordinary commands** and measure **exit 1** (no rewrite):
+
+| Input | Measured on rtk 1.2.1 |
+|-------|-----------------------|
+| `RTK git status` | exit 1 |
+| `./rtk git status` | exit 1 |
+| `rtk.exe git status` | exit 1 |
+| `<absolute path to rtk> git status` (e.g. `C:/.../rtk.exe git status`) | exit 1 |
+| `  rtk git status` (two leading spaces) | exit 3 → `rtk git status` (hits the guard after trim) |
+
+This is the most commonly missed answer to "why was my command not rewritten": **write
+rtk with a different case or with a path and rtk stops recognising it as an rtk
+invocation**. The plugin's own check is wider than upstream (case, path, `.exe` and an
+`ENV=x` prefix all count as an rtk invocation); the direction is "plugin skips → rtk
+returns exit 1 anyway", so the conclusions agree and no rewrite is lost. The
+**Behavioural parity** section below checks this case by case.
+
+**`RTK_REWRITE_HOST` only lifts 3 to 0; it does not change the rewrite.** Probed with
+`git status`:
+
+| Value | Exit code |
+|-------|-----------|
+| unset / `claude` / `codex` / `pi` / `hermes` / `omp` / `opencode` | 3 |
+| `openclaw` | 0 |
+
+Under `openclaw`, `Get-ChildItem` still exits 1 (no equivalent, unchanged), and
+`rtk git status` becomes exit 0 but still echoes `rtk git status` verbatim (the plugin
+suppresses it by comparing the result against the input). Accepting both 0 and 3 is
+therefore required, and the current implementation does.
+
+**The "exit 2 with a message" row rests on upstream source and help text only; it could
+not be produced on this machine.** There is no `~/.claude/settings*.json` and no
+`~/.rtk/config.toml` here, so no pipeline rule refusal can be constructed and no sample
+of "exit 2 + one message" was measured. The plugin discards stdout for it
+unconditionally, runs the original command and stays silent — the conservative direction:
+upstream help states that such a message is a refusal/routing notice and **not** a
+command line, so adopting it would execute a notice as if it were a command.
 
 The plugin itself is platform-agnostic: it consumes only the `rtk rewrite` **process
 contract** (exit code + stdout), which is identical across the Windows, Linux and
@@ -453,25 +518,38 @@ correctness — the original command always runs when there is no equivalent:
 - **`rtk rewrite` does not suppress identity rewrites.** A command already in rtk form
   comes back unchanged under exit 0/3; suppression is the caller's job, which is why
   the plugin compares the result against the input.
-- **A `wc` stage in a pipeline is not rewritten** even though upstream
-  `hooks/README.md` lists it as pipeline-safe; measured `ls | wc -l` and
-  `git log | wc -l` → exit 1 on rtk 1.2.1. Upstream documentation, not the plugin, is
-  what trails reality here.
+- **Pipelines, groups and flags are taken exactly as rtk takes them.** Measured one by
+  one on rtk 1.2.1: `ls | wc -l` and `git log | wc -l` both **exit 1** (upstream
+  `hooks/README.md` lists `wc` as pipeline-safe, which the measurement does not bear
+  out); `git status |& git log` **exit 1** (`|&` unsupported); `{ git status; }` and
+  `( git status )` **exit 1** (groups are not rewritten); `cat -v f.txt` **exit 1**
+  while `cat -n f.txt` → `rtk read -n f.txt` (only `-n` is modelled). For contrast:
+  `git status | head -5` → `rtk git status | head -5` (producer only), and
+  `git status 2>&1` → `rtk git status 2>&1` (`2>&1` is not a write redirect).
+  All rtk-side behaviour; every case just means "original command runs".
 
 ## Verification
 
 ```powershell
-node test.js               # zero-dependency suite, 9 groups (check count grows as
+node test.js               # zero-dependency suite, 14 groups (check count grows as
                            # coverage is added; printed in the final tally line)
-node test.js               #   A rewrite exit-code contract (injected fake rtk)
-                           #   B rtk missing / warn-once
-                           #   C recursion guard
-                           #   D failure safety
-                           #   E pure-function unit checks
-                           #   F compound commands & pipelines (real rtk)
-                           #   G command-family smoke (all 12 families, real rtk)
-                           #   H module contract (exports, package.json, patch file)
-                           #   I multi-platform bash executor (linux/darwin branches
+                           #   A  rewrite exit-code contract (injected fake rtk,
+                           #      including exit 2 with a message)
+                           #   B  rtk missing / warn-once
+                           #   C  recursion guard (explicit expectation table:
+                           #      command / contract product / spawn count)
+                           #   C2 identity-guard parity (real rtk, incl. transparent
+                           #      prefixes and RTK_REWRITE_HOST)
+                           #   D  failure safety
+                           #   D2 failure safety, supplementary
+                           #   E0 export surface and module boundary
+                           #   E1a isRtkInvocation unit checks
+                           #   E1b leading-dash commands (real rtk)
+                           #   E  isRtkInvocation unit checks, supplementary set
+                           #   F  compound commands & pipelines (real rtk)
+                           #   G  command-family smoke (all 12 families, real rtk)
+                           #   H  module contract (exports, package.json, patch file)
+                           #   I  multi-platform bash executor (linux/darwin branches
                            #      via RTK_TEST_PLATFORM, real module-loading path)
 ```
 
@@ -510,6 +588,74 @@ rtk rewrite "git status"          # exit 3, prints: rtk git status
 rtk rewrite "Get-ChildItem"       # exit 1, prints nothing
 ```
 
+## Behavioural parity
+
+The plugin's "is this already an rtk invocation" check (`isRtkInvocation`) has to agree
+with rtk's own guard, and that agreement is not asserted by reading source — it is
+checked case by case by a reproducible probe script.
+
+**Three evidence channels** (rtk compiles its whole rule table into the binary, with no
+resource section and no config file to edit, so all three are needed for cross-checking):
+
+1. **Static PE inspection** (REA): target `rtk.exe`, rtk 1.2.1, PE32+ amd64,
+   `sha256=54a980783fc18816b51f2100d714fbe1c7ce1c3f9d88d65f38dd17ac849a0c25`,
+   18,560,000 bytes; no delay-imports and no PE resource directory
+   (`directories: []`, `resources: []`) — rules, filters and permission rules are all
+   compiled into `.rdata`.
+2. **Targeted upstream source reading**: the `origin/develop` of a local clone of
+   `rtk-ai/rtk` =
+   `dev-1.2.0-rc.620-147-g24ff2267`; the `rewrite` contract files are unchanged since
+   `bd7f87e`. The identity guard lives at `registry.rs:832` (single-command entry) and
+   `:2004` (compound-segment entry).
+3. **Process-level oracle**: the real exit code and stdout of
+   `rtk.exe rewrite "<cmd>"`. The local binary *is* the oracle; no expected strings are
+   hard-coded.
+
+REA's layered backends are unavailable on this machine (Ghidra unconfigured, Hopper does
+not support win32, IDA/Kuna unconfigured, and Windows process capture is unavailable), so
+**every behavioural conclusion rests on channel 3**, with channels 1 and 2 explaining
+*why*. That boundary is recorded in
+`.planning/2026-11-20-rtk-parity/rtk-rewrite-behavior-spec.md`.
+
+**How to run** (an `rtk` executable must be on `PATH` — the script uses
+`execFileSync('rtk', …)`; for a non-PATH install, change the spawn target inside the
+script):
+
+```bash
+node .planning/2026-11-20-rtk-parity/probe-parity.mjs
+```
+
+For each of the 47 cases the script does two things: calls the plugin's
+`isRtkInvocation(cmd)`, then calls the real `rtk rewrite "<cmd>"`. A divergence is
+defined as "the plugin skips (no spawn) but rtk would actually rewrite". The reverse —
+"plugin does not skip but rtk rewrites nothing" — costs one extra spawn and is harmless,
+so it is not counted.
+
+**Current measured output** (rtk 1.2.1, this machine, after the v1.1.14 fix):
+
+```
+总用例: 47 | 分歧(漏改写): 0
+--- 分歧明细（插件跳过但 rtk 会改写）---
+```
+
+**0 divergences out of 47.** Two edge-whitespace variants are fixed by the same change:
+Rust's `char::is_whitespace` includes U+0085 NEL while JS `trim()` does not, and
+`"rtk git status\u0085"` was measured as exit 3 + `"rtk git status"` (a genuine rewrite), so
+the plugin tests the edges with `/^[\s\u0085]|[\s\u0085]$/` instead of a plain `trim()`
+comparison.
+
+Before the fix there was exactly one divergence: the
+whitespace variant `"  rtk git status"` was treated as an rtk invocation and skipped, while
+rtk trims it and echoes back a whitespace-stripped `rtk git status`. Per the contract
+described under [rtk version compatibility](#rtk-version-compatibility), stdout ≠ input is a
+genuine rewrite and **must be adopted** — "same semantics" is not a licence to skip it. The
+fix makes `isRtkInvocation` short-circuit to false on `text !== text.trim()` before segment
+splitting, handing the whitespace form to rtk to normalise.
+
+A wider `lead-verify.mjs` sweep (113 cases: compound/pipeline/background/multi-line, all
+four whitespace classes, the 8 rtk spellings, 9 transparent prefixes, 20 refused constructs)
+reports **0** invariant violations as well, with 43 harmless extra spawns.
+
 ## File Layout
 
 ```
@@ -517,7 +663,7 @@ rtk rewrite "Get-ChildItem"       # exit 1, prints nothing
 │                     # (isRtkInvocation + rtkRewrite + execute; win32 → pwsh base, else bash base)
 ├── cordis.patch.yml  # bundle patch: disable pwsh/bash-sandbox + insert rtk-pwsh-shell / rtk-bash-shell
 ├── package.json      # dsh.bundle.patch points at the patch file; no runtime dependencies
-├── test.js           # zero-dependency verification suite (9 groups)
+├── test.js           # zero-dependency verification suite (14 groups)
 ├── README.md         # English (this file)
 └── README_zh.md      # 中文
 ```

@@ -1,0 +1,11 @@
+import { pathToFileURL } from 'node:url';
+import path from 'node:path';
+process.env.DSH_INSTALL_PACKAGE_JSON = path.resolve('.planning/2026-11-20-rtk-parity/probe-shim/package.json');
+process.env.RTK_BIN = process.execPath;
+const mod = await import(pathToFileURL(path.resolve(process.argv[2])).href + '?x=' + Date.now());
+const ex = new mod.default({});
+globalThis.__specs = [];
+const spec = { command: 'git status' };
+await ex.execute(spec);
+const got = globalThis.__specs.at(-1);
+console.log(JSON.stringify({ sameRef: got === spec, cmd: got.command }));
