@@ -342,7 +342,7 @@ dsh plugin --profile desktop remove dsh-pwsh-rtk-rewrite
 shell、可能不加载 `~/.profile`，此时在 harness 启动环境里显式设
 `RTK_BIN=/home/<你>/.local/bin/rtk`；rtk 官方 Linux 构建以较新的 x86-64 基线
 （AVX2）编译，老 CPU 需按上游 INSTALL.md 源码编译（已在 Pentium G2020 / Ivy Bridge
-机器上以 rtk 1.2.0 验证可行）。
+机器上以 rtk 1.2.1 验证可行）。
 
 **验证**：重启桌面端后跑一条 rtk 必认识的命令（如 `git status`），对比
 `rtk gain` 的 Total commands 计数上升即生效；或在工具输出中看到 rtk 紧凑格式。

@@ -412,7 +412,7 @@ same way (`dsh plugin --profile <name> add dsh-pwsh-rtk-rewrite@<exact version>
 harness is launched from such a context set `RTK_BIN` to the absolute rtk path
 (e.g. `/home/<you>/.local/bin/rtk`); and rtk's official Linux builds target a newer
 x86-64 baseline (AVX2), so on older CPUs build rtk from source per upstream
-INSTALL.md (verified working on a Pentium G2020 / Ivy Bridge box with rtk 1.2.0).
+INSTALL.md (verified working on a Pentium G2020 / Ivy Bridge box with rtk 1.2.1).
 
 **Verify**: after restarting the desktop app, run a command rtk definitely knows
 (e.g. `git status`) and check that `rtk gain`'s Total commands count climbs — or look
